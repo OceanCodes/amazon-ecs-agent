@@ -352,6 +352,8 @@ func (task *Task) dockerHostConfig(container *Container, dockerContainerMap map[
 		Binds:        binds,
 		PortBindings: dockerPortMap,
 		VolumesFrom:  volumesFrom,
+		OomScoreAdj:  500,
+		UsernsMode:   "host",
 	}
 
 	if container.DockerConfig.HostConfig != nil {
