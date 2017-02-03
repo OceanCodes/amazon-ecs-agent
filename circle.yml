@@ -6,7 +6,7 @@ machine:
 
 dependencies:
   override:
-      - make release
+    - make release
 
 test:
   override:
@@ -17,5 +17,5 @@ deployment:
     branch: master
     commands:
       - docker tag amazon/amazon-ecs-agent:latest 524950183868.dkr.ecr.us-east-1.amazonaws.com/codeocean/amazon-ecs-agent:latest
-      - `aws ecr get-login --region us-east-1`
+      - $(aws ecr get-login --region us-east-1)
       - docker push 524950183868.dkr.ecr.us-east-1.amazonaws.com/codeocean/amazon-ecs-agent:latest
