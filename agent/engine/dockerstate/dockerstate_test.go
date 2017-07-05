@@ -1,5 +1,5 @@
 // +build !integration
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,12 +19,13 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/engine/image"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCreateDockerTaskEngineState(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 
-	if _, ok := state.ContainerById("test"); ok {
+	if _, ok := state.ContainerByID("test"); ok {
 		t.Error("Empty state should not have a test container")
 	}
 
@@ -32,7 +33,11 @@ func TestCreateDockerTaskEngineState(t *testing.T) {
 		t.Error("Empty state should not have a test task")
 	}
 
-	if _, ok := state.TaskById("test"); ok {
+	if _, ok := state.TaskByShortID("test"); ok {
+		t.Error("Empty state should not have a test taskid")
+	}
+
+	if _, ok := state.TaskByID("test"); ok {
 		t.Error("Empty state should not have a test taskid")
 	}
 
@@ -43,10 +48,17 @@ func TestCreateDockerTaskEngineState(t *testing.T) {
 	if len(state.AllImageStates()) != 0 {
 		t.Error("Empty state should have no image states")
 	}
+
+	task, ok := state.TaskByShortID("test")
+	if assert.Empty(t, ok, "Empty state should have no tasks") {
+		assert.Empty(t, task, "Empty state should have no tasks")
+	}
+
+	assert.Empty(t, state.GetAllContainerIDs(), "Empty state should have no containers")
 }
 
 func TestAddTask(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 
 	testTask := &api.Task{Arn: "test"}
 	state.AddTask(testTask)
@@ -65,8 +77,8 @@ func TestAddTask(t *testing.T) {
 }
 
 func TestTwophaseAddContainer(t *testing.T) {
-	state := NewDockerTaskEngineState()
-	testTask := &api.Task{Arn: "test", Containers: []*api.Container{&api.Container{
+	state := NewTaskEngineState()
+	testTask := &api.Task{Arn: "test", Containers: []*api.Container{{
 		Name: "testContainer",
 	}}}
 	state.AddTask(testTask)
@@ -97,11 +109,11 @@ func TestTwophaseAddContainer(t *testing.T) {
 	if container.DockerName != "dockerName" {
 		t.Fatal("Incorrect docker name")
 	}
-	if container.DockerId != "" {
+	if container.DockerID != "" {
 		t.Fatal("DockerID Should be blank")
 	}
 
-	state.AddContainer(&api.DockerContainer{DockerName: "dockerName", Container: testTask.Containers[0], DockerId: "did"}, testTask)
+	state.AddContainer(&api.DockerContainer{DockerName: "dockerName", Container: testTask.Containers[0], DockerID: "did"}, testTask)
 
 	containerMap, ok = state.ContainerMapByArn("test")
 	if !ok {
@@ -115,26 +127,26 @@ func TestTwophaseAddContainer(t *testing.T) {
 	if container.DockerName != "dockerName" {
 		t.Fatal("Incorrect docker name")
 	}
-	if container.DockerId != "did" {
+	if container.DockerID != "did" {
 		t.Fatal("DockerID should have been updated")
 	}
 
-	container, ok = state.ContainerById("did")
+	container, ok = state.ContainerByID("did")
 	if !ok {
 		t.Fatal("Could not get container by id")
 	}
-	if container.DockerName != "dockerName" || container.DockerId != "did" {
+	if container.DockerName != "dockerName" || container.DockerID != "did" {
 		t.Fatal("Incorrect container fetched")
 	}
 }
 
 func TestRemoveTask(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 	testContainer := &api.Container{
 		Name: "c1",
 	}
 	testDockerContainer := &api.DockerContainer{
-		DockerId:  "did",
+		DockerID:  "did",
 		Container: testContainer,
 	}
 	testTask := &api.Task{
@@ -159,7 +171,7 @@ func TestRemoveTask(t *testing.T) {
 }
 
 func TestAddImageState(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 
 	testImage := &image.Image{ImageID: "sha256:imagedigest"}
 	testImageState := &image.ImageState{Image: testImage}
@@ -177,7 +189,7 @@ func TestAddImageState(t *testing.T) {
 }
 
 func TestAddEmptyImageState(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 	state.AddImageState(nil)
 
 	if len(state.AllImageStates()) != 0 {
@@ -186,7 +198,7 @@ func TestAddEmptyImageState(t *testing.T) {
 }
 
 func TestAddEmptyIdImageState(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 
 	testImage := &image.Image{ImageID: ""}
 	testImageState := &image.ImageState{Image: testImage}
@@ -198,7 +210,7 @@ func TestAddEmptyIdImageState(t *testing.T) {
 }
 
 func TestRemoveImageState(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 
 	testImage := &image.Image{ImageID: "sha256:imagedigest"}
 	testImageState := &image.ImageState{Image: testImage}
@@ -214,7 +226,7 @@ func TestRemoveImageState(t *testing.T) {
 }
 
 func TestRemoveEmptyImageState(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 
 	testImage := &image.Image{ImageID: "sha256:imagedigest"}
 	testImageState := &image.ImageState{Image: testImage}
@@ -230,7 +242,7 @@ func TestRemoveEmptyImageState(t *testing.T) {
 }
 
 func TestRemoveNonExistingImageState(t *testing.T) {
-	state := NewDockerTaskEngineState()
+	state := NewTaskEngineState()
 
 	testImage := &image.Image{ImageID: "sha256:imagedigest"}
 	testImageState := &image.ImageState{Image: testImage}

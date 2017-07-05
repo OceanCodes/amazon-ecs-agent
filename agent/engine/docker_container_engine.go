@@ -16,6 +16,7 @@ package engine
 import (
 	"archive/tar"
 	"bufio"
+	"encoding/json"
 	"io"
 	"strings"
 	"sync"
@@ -45,8 +46,8 @@ const (
 	// ListContainersTimeout is the timeout for the ListContainers API.
 	ListContainersTimeout   = 10 * time.Minute
 	pullImageTimeout        = 2 * time.Hour
-	createContainerTimeout  = 3 * time.Minute
-	startContainerTimeout   = 1*time.Minute + 30*time.Second
+	createContainerTimeout  = 4 * time.Minute
+	startContainerTimeout   = 3 * time.Minute
 	stopContainerTimeout    = 30 * time.Second
 	removeContainerTimeout  = 5 * time.Minute
 	inspectContainerTimeout = 30 * time.Second
@@ -61,9 +62,9 @@ const (
 	// output will be suppressed in debug mode
 	pullStatusSuppressDelay = 2 * time.Second
 
-	// statsInactivityTimeout controls the amount of time we hold open a
+	// StatsInactivityTimeout controls the amount of time we hold open a
 	// connection to the Docker daemon waiting for stats data
-	statsInactivityTimeout = 5 * time.Second
+	StatsInactivityTimeout = 5 * time.Second
 )
 
 // DockerClient interface to make testing it easier
@@ -131,7 +132,7 @@ func (dg *dockerGoClient) WithVersion(version dockerclient.DockerVersion) Docker
 var scratchCreateLock sync.Mutex
 
 // NewDockerGoClient creates a new DockerGoClient
-func NewDockerGoClient(clientFactory dockerclient.Factory, acceptInsecureCert bool, cfg *config.Config) (DockerClient, error) {
+func NewDockerGoClient(clientFactory dockerclient.Factory, cfg *config.Config) (DockerClient, error) {
 	client, err := clientFactory.GetDefaultClient()
 	if err != nil {
 		log.Error("Unable to connect to docker daemon. Ensure docker is running.", "err", err)
@@ -146,10 +147,14 @@ func NewDockerGoClient(clientFactory dockerclient.Factory, acceptInsecureCert bo
 		return nil, err
 	}
 
+	var dockerAuthData json.RawMessage
+	if cfg.EngineAuthData != nil {
+		dockerAuthData = cfg.EngineAuthData.Contents()
+	}
 	return &dockerGoClient{
 		clientFactory:    clientFactory,
-		auth:             dockerauth.NewDockerAuthProvider(cfg.EngineAuthType, cfg.EngineAuthData.Contents()),
-		ecrClientFactory: ecr.NewECRFactory(acceptInsecureCert),
+		auth:             dockerauth.NewDockerAuthProvider(cfg.EngineAuthType, dockerAuthData),
+		ecrClientFactory: ecr.NewECRFactory(cfg.AcceptInsecureCert),
 		config:           cfg,
 	}, nil
 }
@@ -809,7 +814,7 @@ func (dg *dockerGoClient) Stats(id string, ctx context.Context) (<-chan *docker.
 		Stats:             stats,
 		Stream:            true,
 		Context:           ctx,
-		InactivityTimeout: statsInactivityTimeout,
+		InactivityTimeout: StatsInactivityTimeout,
 	}
 
 	go func() {

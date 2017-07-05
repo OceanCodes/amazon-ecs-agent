@@ -1,6 +1,6 @@
 //+build !windows,integration
 // Disabled on Windows until Stats are actually supported
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -33,7 +33,7 @@ func (resolver *IntegContainerMetadataResolver) addToMap(containerID string) {
 		Version: taskDefinitionVersion,
 	}
 	resolver.containerIDToDockerContainer[containerID] = &api.DockerContainer{
-		DockerId:  containerID,
+		DockerID:  containerID,
 		Container: &api.Container{},
 	}
 }
@@ -246,7 +246,7 @@ func TestStatsEngineWithNewContainers(t *testing.T) {
 
 func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 	containerChangeEventStream := eventStream("TestStatsEngineWithDockerTaskEngine")
-	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewDockerTaskEngineState())
+	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState())
 	container, err := createGremlin(client)
 	if err != nil {
 		t.Fatalf("Error creating container: %v", err)
@@ -264,24 +264,24 @@ func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 		Force: true,
 	})
 	containers := []*api.Container{
-		&api.Container{
+		{
 			Name: "gremlin",
 		},
 	}
 	testTask := api.Task{
-		Arn:           "gremlin-task",
-		DesiredStatus: api.TaskRunning,
-		KnownStatus:   api.TaskRunning,
-		Family:        "test",
-		Version:       "1",
-		Containers:    containers,
+		Arn:                 "gremlin-task",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskRunning,
+		Family:              "test",
+		Version:             "1",
+		Containers:          containers,
 	}
 	// Populate Tasks and Container map in the engine.
 	dockerTaskEngine, _ := taskEngine.(*ecsengine.DockerTaskEngine)
 	dockerTaskEngine.State().AddTask(&testTask)
 	dockerTaskEngine.State().AddContainer(
 		&api.DockerContainer{
-			DockerId:   container.ID,
+			DockerID:   container.ID,
 			DockerName: "gremlin",
 			Container:  containers[0],
 		},
@@ -376,7 +376,7 @@ func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 
 func TestStatsEngineWithDockerTaskEngineMissingRemoveEvent(t *testing.T) {
 	containerChangeEventStream := eventStream("TestStatsEngineWithDockerTaskEngine")
-	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewDockerTaskEngineState())
+	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState())
 
 	container, err := createGremlin(client)
 	if err != nil {
@@ -387,25 +387,25 @@ func TestStatsEngineWithDockerTaskEngineMissingRemoveEvent(t *testing.T) {
 		Force: true,
 	})
 	containers := []*api.Container{
-		&api.Container{
-			Name:        "gremlin",
-			KnownStatus: api.ContainerStopped,
+		{
+			Name:              "gremlin",
+			KnownStatusUnsafe: api.ContainerStopped,
 		},
 	}
 	testTask := api.Task{
-		Arn:           "gremlin-task",
-		DesiredStatus: api.TaskRunning,
-		KnownStatus:   api.TaskRunning,
-		Family:        "test",
-		Version:       "1",
-		Containers:    containers,
+		Arn:                 "gremlin-task",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskRunning,
+		Family:              "test",
+		Version:             "1",
+		Containers:          containers,
 	}
 	// Populate Tasks and Container map in the engine.
 	dockerTaskEngine, _ := taskEngine.(*ecsengine.DockerTaskEngine)
 	dockerTaskEngine.State().AddTask(&testTask)
 	dockerTaskEngine.State().AddContainer(
 		&api.DockerContainer{
-			DockerId:   container.ID,
+			DockerID:   container.ID,
 			DockerName: "gremlin",
 			Container:  containers[0],
 		},

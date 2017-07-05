@@ -1,5 +1,5 @@
 //+build !integration
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -36,14 +36,14 @@ type StatTestData struct {
 }
 
 var statsData = []*StatTestData{
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.131117533Z"), 22400432, 1839104},
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.232291187Z"), 116499979, 3649536},
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.333776335Z"), 248503503, 3649536},
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.434753595Z"), 372167097, 3649536},
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.535746779Z"), 502862518, 3649536},
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.638709495Z"), 638485801, 3649536},
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.739985398Z"), 780707806, 3649536},
-	&StatTestData{parseNanoTime("2015-02-12T21:22:05.840941705Z"), 911624529, 3649536},
+	{parseNanoTime("2015-02-12T21:22:05.131117533Z"), 22400432, 1839104},
+	{parseNanoTime("2015-02-12T21:22:05.232291187Z"), 116499979, 3649536},
+	{parseNanoTime("2015-02-12T21:22:05.333776335Z"), 248503503, 3649536},
+	{parseNanoTime("2015-02-12T21:22:05.434753595Z"), 372167097, 3649536},
+	{parseNanoTime("2015-02-12T21:22:05.535746779Z"), 502862518, 3649536},
+	{parseNanoTime("2015-02-12T21:22:05.638709495Z"), 638485801, 3649536},
+	{parseNanoTime("2015-02-12T21:22:05.739985398Z"), 780707806, 3649536},
+	{parseNanoTime("2015-02-12T21:22:05.840941705Z"), 911624529, 3649536},
 }
 
 func TestContainerStatsCollection(t *testing.T) {
@@ -137,9 +137,9 @@ func TestContainerStatsCollectionReconnection(t *testing.T) {
 	close(closedChan)
 
 	mockContainer := &api.DockerContainer{
-		DockerId: dockerID,
+		DockerID: dockerID,
 		Container: &api.Container{
-			KnownStatus: api.ContainerRunning,
+			KnownStatusUnsafe: api.ContainerRunning,
 		},
 	}
 	gomock.InOrder(
@@ -178,9 +178,9 @@ func TestContainerStatsCollectionStopsIfContainerIsTerminal(t *testing.T) {
 
 	statsErr := fmt.Errorf("test error")
 	mockContainer := &api.DockerContainer{
-		DockerId: dockerID,
+		DockerID: dockerID,
 		Container: &api.Container{
-			KnownStatus: api.ContainerStopped,
+			KnownStatusUnsafe: api.ContainerStopped,
 		},
 	}
 	gomock.InOrder(

@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,7 +16,6 @@ package ecsclient
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -45,7 +44,7 @@ func NewMockClient(ctrl *gomock.Controller, ec2Metadata ec2.EC2MetadataClient, a
 		&config.Config{Cluster: configuredCluster,
 			AWSRegion:          "us-east-1",
 			InstanceAttributes: additionalAttributes,
-		}, http.DefaultClient, ec2Metadata)
+		}, ec2Metadata)
 	mockSDK := mock_api.NewMockECSSDK(ctrl)
 	mockSubmitStateSDK := mock_api.NewMockECSSubmitStateSDK(ctrl)
 	client.(*APIECSClient).SetSDK(mockSDK)
@@ -96,13 +95,13 @@ func TestSubmitContainerStateChange(t *testing.T) {
 			ContainerName: strptr("cont"),
 			Status:        strptr("RUNNING"),
 			NetworkBindings: []*ecs.NetworkBinding{
-				&ecs.NetworkBinding{
+				{
 					BindIP:        strptr("1.2.3.4"),
 					ContainerPort: int64ptr(intptr(1)),
 					HostPort:      int64ptr(intptr(2)),
 					Protocol:      strptr("tcp"),
 				},
-				&ecs.NetworkBinding{
+				{
 					BindIP:        strptr("2.2.3.4"),
 					ContainerPort: int64ptr(intptr(3)),
 					HostPort:      int64ptr(intptr(4)),
@@ -116,13 +115,13 @@ func TestSubmitContainerStateChange(t *testing.T) {
 		ContainerName: "cont",
 		Status:        api.ContainerRunning,
 		PortBindings: []api.PortBinding{
-			api.PortBinding{
-				BindIp:        "1.2.3.4",
+			{
+				BindIP:        "1.2.3.4",
 				ContainerPort: 1,
 				HostPort:      2,
 			},
-			api.PortBinding{
-				BindIp:        "2.2.3.4",
+			{
+				BindIP:        "2.2.3.4",
 				ContainerPort: 3,
 				HostPort:      4,
 				Protocol:      api.TransportProtocolUDP,
@@ -150,7 +149,7 @@ func TestSubmitContainerStateChangeFull(t *testing.T) {
 			ExitCode:      int64ptr(&exitCode),
 			Reason:        strptr(reason),
 			NetworkBindings: []*ecs.NetworkBinding{
-				&ecs.NetworkBinding{
+				{
 					BindIP:        strptr(""),
 					ContainerPort: int64ptr(intptr(0)),
 					HostPort:      int64ptr(intptr(0)),
@@ -166,7 +165,7 @@ func TestSubmitContainerStateChangeFull(t *testing.T) {
 		ExitCode:      &exitCode,
 		Reason:        reason,
 		PortBindings: []api.PortBinding{
-			api.PortBinding{},
+			{},
 		},
 	})
 	if err != nil {
@@ -248,7 +247,7 @@ func buildAttributeList(capabilities []string, attributes map[string]string) []*
 
 func TestReRegisterContainerInstance(t *testing.T) {
 	additionalAttributes := map[string]string{"my_custom_attribute": "Custom_Value1",
-		"my_other_custom_attribute": "Custom_Value2",
+		"my_other_custom_attribute":    "Custom_Value2",
 		"attribute_name_with_no_value": "",
 	}
 
@@ -382,7 +381,7 @@ func TestRegisterBlankCluster(t *testing.T) {
 	defer mockCtrl.Finish()
 	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(mockCtrl)
 	// Test the special 'empty cluster' behavior of creating 'default'
-	client := NewECSClient(credentials.AnonymousCredentials, &config.Config{Cluster: "", AWSRegion: "us-east-1"}, http.DefaultClient, mockEC2Metadata)
+	client := NewECSClient(credentials.AnonymousCredentials, &config.Config{Cluster: "", AWSRegion: "us-east-1"}, mockEC2Metadata)
 	mc := mock_api.NewMockECSSDK(mockCtrl)
 	client.(*APIECSClient).SetSDK(mc)
 

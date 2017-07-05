@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -29,6 +29,8 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/agent/utils/mocks"
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const testContainerInstanceArn = "test_container_instance_arn"
@@ -78,6 +80,30 @@ func TestGetTaskByDockerID(t *testing.T) {
 	taskDiffHelper(t, []*api.Task{testTasks[1]}, TasksResponse{Tasks: []*TaskResponse{&taskResponse}})
 }
 
+func TestGetTaskByShortDockerIDMultiple(t *testing.T) {
+	recorder := performMockRequest(t, "/v1/tasks?dockerid=dockerid-tas")
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code, "Expected http 400 for dockerid with multiple matches")
+}
+
+func TestGetTaskShortByDockerID404(t *testing.T) {
+	recorder := performMockRequest(t, "/v1/tasks?dockerid=notfound")
+
+	assert.Equal(t, http.StatusNotFound, recorder.Code, "API did not return 404 for bad dockerid")
+}
+
+func TestGetTaskByShortDockerID(t *testing.T) {
+	// stateSetupHelper uses the convention of dockerid-$arn-$containerName; the
+	// first task has a container name prefix of dockerid-tas
+	recorder := performMockRequest(t, "/v1/tasks?dockerid=dockerid-by")
+
+	var taskResponse TaskResponse
+	err := json.Unmarshal(recorder.Body.Bytes(), &taskResponse)
+	require.NoError(t, err, "unmarshal failed for get task by short docker id")
+
+	taskDiffHelper(t, []*api.Task{testTasks[2]}, TasksResponse{Tasks: []*TaskResponse{&taskResponse}})
+}
+
 func TestGetTaskByDockerID404(t *testing.T) {
 	recorder := performMockRequest(t, "/v1/tasks?dockerid=does-not-exist")
 
@@ -122,20 +148,20 @@ func TestBackendMismatchMapping(t *testing.T) {
 	mockStateResolver := mock_handlers.NewMockDockerStateResolver(ctrl)
 
 	containers := []*api.Container{
-		&api.Container{
+		{
 			Name: "c1",
 		},
 	}
 	testTask := &api.Task{
-		Arn:           "task1",
-		DesiredStatus: api.TaskRunning,
-		KnownStatus:   api.TaskStopped,
-		Family:        "test",
-		Version:       "1",
-		Containers:    containers,
+		Arn:                 "task1",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskStopped,
+		Family:              "test",
+		Version:             "1",
+		Containers:          containers,
 	}
 
-	state := dockerstate.NewDockerTaskEngineState()
+	state := dockerstate.NewTaskEngineState()
 	stateSetupHelper(state, []*api.Task{testTask})
 
 	mockStateResolver.EXPECT().State().Return(state)
@@ -238,11 +264,11 @@ func taskDiffHelper(t *testing.T, expected []*api.Task, actual TasksResponse) {
 
 var testTasks = []*api.Task{
 	{
-		Arn:           "task1",
-		DesiredStatus: api.TaskRunning,
-		KnownStatus:   api.TaskRunning,
-		Family:        "test",
-		Version:       "1",
+		Arn:                 "task1",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskRunning,
+		Family:              "test",
+		Version:             "1",
 		Containers: []*api.Container{
 			{
 				Name: "one",
@@ -253,26 +279,38 @@ var testTasks = []*api.Task{
 		},
 	},
 	{
-		Arn:           "task2",
-		DesiredStatus: api.TaskRunning,
-		KnownStatus:   api.TaskRunning,
-		Family:        "test",
-		Version:       "2",
+		Arn:                 "task2",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskRunning,
+		Family:              "test",
+		Version:             "2",
 		Containers: []*api.Container{
 			{
 				Name: "foo",
 			},
 		},
 	},
+	{
+		Arn:                 "byShortId",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskRunning,
+		Family:              "test",
+		Version:             "2",
+		Containers: []*api.Container{
+			{
+				Name: "shortId",
+			},
+		},
+	},
 }
 
-func stateSetupHelper(state *dockerstate.DockerTaskEngineState, tasks []*api.Task) {
+func stateSetupHelper(state dockerstate.TaskEngineState, tasks []*api.Task) {
 	for _, task := range tasks {
 		state.AddTask(task)
 		for _, container := range task.Containers {
 			state.AddContainer(&api.DockerContainer{
 				Container:  container,
-				DockerId:   "dockerid-" + task.Arn + "-" + container.Name,
+				DockerID:   "dockerid-" + task.Arn + "-" + container.Name,
 				DockerName: "dockername-" + task.Arn + "-" + container.Name,
 			}, task)
 		}
@@ -285,7 +323,7 @@ func performMockRequest(t *testing.T, path string) *httptest.ResponseRecorder {
 
 	mockStateResolver := mock_handlers.NewMockDockerStateResolver(ctrl)
 
-	state := dockerstate.NewDockerTaskEngineState()
+	state := dockerstate.NewTaskEngineState()
 	stateSetupHelper(state, testTasks)
 
 	mockStateResolver.EXPECT().State().Return(state)

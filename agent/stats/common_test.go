@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -23,6 +23,7 @@ import (
 	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
+	"github.com/aws/amazon-ecs-agent/agent/statechange"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
@@ -62,7 +63,7 @@ var defaultContainerInstance = "ci"
 
 func init() {
 	cfg.EngineAuthData = config.NewSensitiveRawMessage([]byte{})
-	dockerClient, _ = ecsengine.NewDockerGoClient(clientFactory, false, &cfg)
+	dockerClient, _ = ecsengine.NewDockerGoClient(clientFactory, &cfg)
 }
 
 // eventStream returns the event stream used to receive container change events
@@ -172,8 +173,8 @@ func validateMetricsMetadata(metadata *ecstcs.MetricsMetadata) error {
 
 func createFakeContainerStats() []*ContainerStats {
 	return []*ContainerStats{
-		&ContainerStats{22400432, 1839104, parseNanoTime("2015-02-12T21:22:05.131117533Z")},
-		&ContainerStats{116499979, 3649536, parseNanoTime("2015-02-12T21:22:05.232291187Z")},
+		{22400432, 1839104, parseNanoTime("2015-02-12T21:22:05.131117533Z")},
+		{116499979, 3649536, parseNanoTime("2015-02-12T21:22:05.232291187Z")},
 	}
 }
 
@@ -186,8 +187,8 @@ func (engine *MockTaskEngine) Init() error {
 func (engine *MockTaskEngine) MustInit() {
 }
 
-func (engine *MockTaskEngine) TaskEvents() (<-chan api.TaskStateChange, <-chan api.ContainerStateChange) {
-	return make(chan api.TaskStateChange), make(chan api.ContainerStateChange)
+func (engine *MockTaskEngine) StateChangeEvents() <-chan statechange.Event {
+	return make(chan statechange.Event)
 }
 
 func (engine *MockTaskEngine) SetSaver(statemanager.Saver) {

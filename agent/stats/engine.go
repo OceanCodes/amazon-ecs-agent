@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,6 +16,7 @@ package stats
 //go:generate go run ../../scripts/generate/mockgen.go github.com/aws/amazon-ecs-agent/agent/stats Engine mock/$GOFILE
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -35,6 +36,7 @@ import (
 const (
 	containerChangeHandler = "DockerStatsEngineDockerEventsHandler"
 	listContainersTimeout  = 10 * time.Minute
+	queueResetThreshold    = 2 * ecsengine.StatsInactivityTimeout
 )
 
 // DockerContainerMetadataResolver implements ContainerMetadataResolver for
@@ -67,13 +69,14 @@ type DockerStatsEngine struct {
 // dockerStatsEngine is a singleton object of DockerStatsEngine.
 // TODO make dockerStatsEngine not a singleton object
 var dockerStatsEngine *DockerStatsEngine
+var EmptyMetricsError = errors.New("No task metrics to report")
 
 // ResolveTask resolves the api task object, given container id.
 func (resolver *DockerContainerMetadataResolver) ResolveTask(dockerID string) (*api.Task, error) {
 	if resolver.dockerTaskEngine == nil {
 		return nil, fmt.Errorf("Docker task engine uninitialized")
 	}
-	task, found := resolver.dockerTaskEngine.State().TaskById(dockerID)
+	task, found := resolver.dockerTaskEngine.State().TaskByID(dockerID)
 	if !found {
 		return nil, fmt.Errorf("Could not map docker id to task: %s", dockerID)
 	}
@@ -86,7 +89,7 @@ func (resolver *DockerContainerMetadataResolver) ResolveContainer(dockerID strin
 	if resolver.dockerTaskEngine == nil {
 		return nil, fmt.Errorf("Docker task engine uninitialized")
 	}
-	container, found := resolver.dockerTaskEngine.State().ContainerById(dockerID)
+	container, found := resolver.dockerTaskEngine.State().ContainerByID(dockerID)
 	if !found {
 		return nil, fmt.Errorf("Could not map docker id to container: %s", dockerID)
 	}
@@ -234,7 +237,7 @@ func (engine *DockerStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, 
 
 	if len(taskMetrics) == 0 {
 		// Not idle. Expect taskMetrics to be there.
-		return nil, nil, fmt.Errorf("No task metrics to report")
+		return nil, nil, EmptyMetricsError
 	}
 
 	// Reset current stats. Retaining older stats results in incorrect utilization stats
@@ -398,6 +401,13 @@ func (engine *DockerStatsEngine) getContainerMetricsForTask(taskArn string) ([]*
 			engine.doRemoveContainer(container, taskArn)
 			continue
 		}
+
+		if !container.statsQueue.enoughDatapointsInBuffer() &&
+			!container.statsQueue.resetThresholdElapsed(queueResetThreshold) {
+			seelog.Debugf("Stats not ready for container %s", dockerID)
+			continue
+		}
+
 		// Container is not terminal. Get CPU stats set.
 		cpuStatsSet, err := container.statsQueue.GetCPUStatsSet()
 		if err != nil {

@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -33,7 +33,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/handlers"
 	credentialshandler "github.com/aws/amazon-ecs-agent/agent/handlers/credentials"
-	"github.com/aws/amazon-ecs-agent/agent/httpclient"
 	"github.com/aws/amazon-ecs-agent/agent/logger"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers/exitcodes"
@@ -41,6 +40,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/tcs/handler"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/agent/version"
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/defaults"
 	log "github.com/cihub/seelog"
@@ -92,14 +92,15 @@ func _main() int {
 	}
 
 	log.Infof("Starting Agent: %s", version.String())
-	if *acceptInsecureCert {
+	if aws.BoolValue(acceptInsecureCert) {
 		log.Warn("SSL certificate verification disabled. This is not recommended.")
 	}
 	log.Info("Loading configuration")
 	cfg, cfgErr := config.NewConfig(ec2MetadataClient)
+	cfg.AcceptInsecureCert = aws.BoolValue(acceptInsecureCert)
 	// Load cfg and create Docker client before doing 'versionFlag' so that it has the DOCKER_HOST variable loaded if needed
 	clientFactory := dockerclient.NewFactory(cfg.DockerEndpoint)
-	dockerClient, err := engine.NewDockerGoClient(clientFactory, *acceptInsecureCert, cfg)
+	dockerClient, err := engine.NewDockerGoClient(clientFactory, cfg)
 	if err != nil {
 		log.Criticalf("Error creating Docker client: %v", err)
 		return exitcodes.ExitError
@@ -114,7 +115,7 @@ func _main() int {
 	// the credentials handler
 	credentialsManager := credentials.NewManager()
 	// Create image manager. This will be used by the task engine for saving image states
-	state := dockerstate.NewDockerTaskEngineState()
+	state := dockerstate.NewTaskEngineState()
 	imageManager := engine.NewImageManager(cfg, dockerClient, state)
 	if *versionFlag {
 		versionableEngine := engine.NewTaskEngine(cfg, dockerClient, credentialsManager, containerChangeEventStream, imageManager, state)
@@ -204,8 +205,7 @@ func _main() int {
 	if preflightCreds, err := credentialProvider.Get(); err != nil || preflightCreds.AccessKeyID == "" {
 		log.Warnf("Error getting valid credentials (AKID %s): %v", preflightCreds.AccessKeyID, err)
 	}
-	client := ecsclient.NewECSClient(credentialProvider, cfg,
-		httpclient.New(ecsclient.RoundtripTimeout, *acceptInsecureCert), ec2MetadataClient)
+	client := ecsclient.NewECSClient(credentialProvider, cfg, ec2MetadataClient)
 
 	if containerInstanceArn == "" {
 		log.Info("Registering Instance with ECS")
@@ -259,20 +259,21 @@ func _main() int {
 	// Start serving the endpoint to fetch IAM Role credentials
 	go credentialshandler.ServeHTTP(credentialsManager, containerInstanceArn, cfg)
 
+	taskHandler := eventhandler.NewTaskHandler()
+
 	// Start sending events to the backend
-	go eventhandler.HandleEngineEvents(taskEngine, client, stateManager)
+	go eventhandler.HandleEngineEvents(taskEngine, client, stateManager, taskHandler)
 
 	deregisterInstanceEventStream := eventstream.NewEventStream(DeregisterContainerInstanceEventStream, ctx)
 	deregisterInstanceEventStream.StartListening()
 
 	telemetrySessionParams := tcshandler.TelemetrySessionParams{
-		ContainerInstanceArn: containerInstanceArn,
-		CredentialProvider:   credentialProvider,
-		Cfg:                  cfg,
+		CredentialProvider:            credentialProvider,
+		Cfg:                           cfg,
+		ContainerInstanceArn:          containerInstanceArn,
 		DeregisterInstanceEventStream: deregisterInstanceEventStream,
 		ContainerChangeEventStream:    containerChangeEventStream,
 		DockerClient:                  dockerClient,
-		AcceptInvalidCert:             *acceptInsecureCert,
 		ECSClient:                     client,
 		TaskEngine:                    taskEngine,
 	}
@@ -282,7 +283,6 @@ func _main() int {
 
 	acsSession := acshandler.NewSession(
 		ctx,
-		*acceptInsecureCert,
 		cfg,
 		deregisterInstanceEventStream,
 		containerInstanceArn,
@@ -291,6 +291,7 @@ func _main() int {
 		stateManager,
 		taskEngine,
 		credentialsManager,
+		taskHandler,
 	)
 	log.Info("Beginning Polling for updates")
 	err = acsSession.Start()

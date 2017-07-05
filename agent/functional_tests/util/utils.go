@@ -579,23 +579,28 @@ func SearchStrInDir(dir, filePrefix, content string) error {
 	}
 
 	var desiredFile string
+	found := false
+
 	for _, file := range logfiles {
 		if strings.HasPrefix(file.Name(), filePrefix) {
 			desiredFile = file.Name()
-			break
+			if utils.ZeroOrNil(desiredFile) {
+				return fmt.Errorf("File with prefix: %v does not exist", filePrefix)
+			}
+
+			data, err := ioutil.ReadFile(filepath.Join(dir, desiredFile))
+			if err != nil {
+				return fmt.Errorf("Failed to read file, err: %v", err)
+			}
+
+			if strings.Contains(string(data), content) {
+				found = true
+				break
+			}
 		}
 	}
 
-	if utils.ZeroOrNil(desiredFile) {
-		return fmt.Errorf("File with prefix: %v does not exist", filePrefix)
-	}
-
-	data, err := ioutil.ReadFile(filepath.Join(dir, desiredFile))
-	if err != nil {
-		return fmt.Errorf("Failed to read file, err: %v", err)
-	}
-
-	if !strings.Contains(string(data), content) {
+	if !found {
 		return fmt.Errorf("Could not find the content: %v in the file: %v", content, desiredFile)
 	}
 
@@ -645,4 +650,13 @@ func (agent *TestAgent) SweepTask(task *TestTask) error {
 	}
 
 	return nil
+}
+
+// AttributesToMap transforms a list of key, value attributes to return a map
+func AttributesToMap(attributes []*ecs.Attribute) map[string]string {
+	attributeMap := make(map[string]string)
+	for _, attribute := range attributes {
+		attributeMap[aws.StringValue(attribute.Name)] = aws.StringValue(attribute.Value)
+	}
+	return attributeMap
 }

@@ -1,5 +1,5 @@
 // +build !integration
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -65,7 +65,7 @@ func dockerClientSetupWithConfig(t *testing.T, conf config.Config) (*mock_docker
 	mockTime := mock_ttime.NewMockTime(ctrl)
 
 	conf.EngineAuthData = config.NewSensitiveRawMessage([]byte{})
-	client, _ := NewDockerGoClient(factory, false, &conf)
+	client, _ := NewDockerGoClient(factory, &conf)
 	goClient, _ := client.(*dockerGoClient)
 	ecrClientFactory := mock_ecr.NewMockECRFactory(ctrl)
 	goClient.ecrClientFactory = ecrClientFactory
@@ -241,7 +241,7 @@ func TestPullImageECRSuccess(t *testing.T) {
 	mockDocker.EXPECT().Ping().AnyTimes().Return(nil)
 	factory := mock_dockerclient.NewMockFactory(ctrl)
 	factory.EXPECT().GetDefaultClient().AnyTimes().Return(mockDocker, nil)
-	client, _ := NewDockerGoClient(factory, false, defaultTestConfig())
+	client, _ := NewDockerGoClient(factory, defaultTestConfig())
 	goClient, _ := client.(*dockerGoClient)
 	ecrClientFactory := mock_ecr.NewMockECRFactory(ctrl)
 	ecrClient := mock_ecr.NewMockECRClient(ctrl)
@@ -257,7 +257,7 @@ func TestPullImageECRSuccess(t *testing.T) {
 	authData := &api.RegistryAuthenticationData{
 		Type: "ecr",
 		ECRAuthData: &api.ECRAuthData{
-			RegistryId:       registryID,
+			RegistryID:       registryID,
 			Region:           region,
 			EndpointOverride: endpointOverride,
 		},
@@ -297,7 +297,7 @@ func TestPullImageECRAuthFail(t *testing.T) {
 	mockDocker.EXPECT().Ping().AnyTimes().Return(nil)
 	factory := mock_dockerclient.NewMockFactory(ctrl)
 	factory.EXPECT().GetDefaultClient().AnyTimes().Return(mockDocker, nil)
-	client, _ := NewDockerGoClient(factory, false, defaultTestConfig())
+	client, _ := NewDockerGoClient(factory, defaultTestConfig())
 	goClient, _ := client.(*dockerGoClient)
 	ecrClientFactory := mock_ecr.NewMockECRFactory(ctrl)
 	ecrClient := mock_ecr.NewMockECRClient(ctrl)
@@ -313,7 +313,7 @@ func TestPullImageECRAuthFail(t *testing.T) {
 	authData := &api.RegistryAuthenticationData{
 		Type: "ecr",
 		ECRAuthData: &api.ECRAuthData{
-			RegistryId:       registryID,
+			RegistryID:       registryID,
 			Region:           region,
 			EndpointOverride: endpointOverride,
 		},
@@ -561,7 +561,7 @@ func TestContainerEvents(t *testing.T) {
 		ID: "cid2",
 		NetworkSettings: &docker.NetworkSettings{
 			Ports: map[docker.Port][]docker.PortBinding{
-				"80/tcp": []docker.PortBinding{docker.PortBinding{HostPort: "9001"}},
+				"80/tcp": {{HostPort: "9001"}},
 			},
 		},
 		Volumes: map[string]string{"/host/path": "/container/path"},
@@ -684,7 +684,7 @@ func TestListContainers(t *testing.T) {
 	mockDocker, client, _, done := dockerClientSetup(t)
 	defer done()
 
-	containers := []docker.APIContainers{docker.APIContainers{ID: "id"}}
+	containers := []docker.APIContainers{{ID: "id"}}
 	mockDocker.EXPECT().ListContainers(gomock.Any()).Return(containers, nil)
 	response := client.ListContainers(true, ListContainersTimeout)
 	if response.Error != nil {
@@ -730,7 +730,7 @@ func TestPingFailError(t *testing.T) {
 	mockDocker.EXPECT().Ping().Return(errors.New("err"))
 	factory := mock_dockerclient.NewMockFactory(ctrl)
 	factory.EXPECT().GetDefaultClient().Return(mockDocker, nil)
-	_, err := NewDockerGoClient(factory, false, defaultTestConfig())
+	_, err := NewDockerGoClient(factory, defaultTestConfig())
 	if err == nil {
 		t.Fatal("Expected ping error to result in constructor fail")
 	}
@@ -743,7 +743,7 @@ func TestUsesVersionedClient(t *testing.T) {
 	mockDocker.EXPECT().Ping().Return(nil)
 	factory := mock_dockerclient.NewMockFactory(ctrl)
 	factory.EXPECT().GetDefaultClient().Return(mockDocker, nil)
-	client, err := NewDockerGoClient(factory, false, defaultTestConfig())
+	client, err := NewDockerGoClient(factory, defaultTestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +764,7 @@ func TestUnavailableVersionError(t *testing.T) {
 	mockDocker.EXPECT().Ping().Return(nil)
 	factory := mock_dockerclient.NewMockFactory(ctrl)
 	factory.EXPECT().GetDefaultClient().Return(mockDocker, nil)
-	client, err := NewDockerGoClient(factory, false, defaultTestConfig())
+	client, err := NewDockerGoClient(factory, defaultTestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}

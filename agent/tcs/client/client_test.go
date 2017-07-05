@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -26,12 +26,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
 )
 
@@ -77,6 +79,12 @@ type mockStatsEngine struct{}
 
 func (engine *mockStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
 	return nil, nil, fmt.Errorf("uninitialized")
+}
+
+type emptyStatsEngine struct{}
+
+func (engine *emptyStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
+	return nil, nil, fmt.Errorf("empty stats")
 }
 
 type idleStatsEngine struct{}
@@ -150,6 +158,14 @@ func TestPublishMetricsRequest(t *testing.T) {
 
 	cs.Close()
 }
+func TestPublishMetricsOnceEmptyStatsError(t *testing.T) {
+	cs := clientServer{
+		statsEngine: &emptyStatsEngine{},
+	}
+	err := cs.publishMetricsOnce()
+
+	assert.Error(t, err, "Failed: expecting publishMerticOnce return err ")
+}
 
 func TestPublishOnceIdleStatsEngine(t *testing.T) {
 	cs := clientServer{
@@ -207,9 +223,13 @@ func TestPublishOnceNonIdleStatsEngine(t *testing.T) {
 
 func testCS() (wsclient.ClientServer, *messageLogger) {
 	testCreds := credentials.AnonymousCredentials
-	cs := New("localhost:443", "us-east-1", testCreds, true, &mockStatsEngine{}, testPublishMetricsInterval).(*clientServer)
+	cfg := &config.Config{
+		AWSRegion:          "us-east-1",
+		AcceptInsecureCert: true,
+	}
+	cs := New("localhost:443", cfg, testCreds, &mockStatsEngine{}, testPublishMetricsInterval).(*clientServer)
 	ml := &messageLogger{make([][]byte, 0), make([][]byte, 0), false}
-	cs.Conn = ml
+	cs.SetConnection(ml)
 	return cs, ml
 }
 

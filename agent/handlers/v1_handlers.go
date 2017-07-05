@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -35,6 +35,7 @@ var log = logger.ForModule("Handlers")
 const (
 	dockerIdQueryField = "dockerid"
 	taskArnQueryField  = "taskarn"
+	dockerShortIdLen   = 12
 )
 
 type rootResponse struct {
@@ -68,7 +69,7 @@ func newTaskResponse(task *api.Task, containerMap map[string]*api.DockerContaine
 		if container.Container.IsInternal {
 			continue
 		}
-		containers = append(containers, ContainerResponse{container.DockerId, container.DockerName, containerName})
+		containers = append(containers, ContainerResponse{container.DockerID, container.DockerName, containerName})
 	}
 
 	knownStatus := task.GetKnownStatus()
@@ -90,7 +91,7 @@ func newTaskResponse(task *api.Task, containerMap map[string]*api.DockerContaine
 	}
 }
 
-func newTasksResponse(state *dockerstate.DockerTaskEngineState) *TasksResponse {
+func newTasksResponse(state dockerstate.TaskEngineState) *TasksResponse {
 	allTasks := state.AllTasks()
 	taskResponses := make([]*TaskResponse, len(allTasks))
 	for ndx, task := range allTasks {
@@ -102,7 +103,7 @@ func newTasksResponse(state *dockerstate.DockerTaskEngineState) *TasksResponse {
 }
 
 // Creates JSON response and sets the http status code for the task queried.
-func createTaskJSONResponse(task *api.Task, found bool, resourceId string, state *dockerstate.DockerTaskEngineState) ([]byte, int) {
+func createTaskJSONResponse(task *api.Task, found bool, resourceId string, state dockerstate.TaskEngineState) ([]byte, int) {
 	var responseJSON []byte
 	status := http.StatusOK
 	if found {
@@ -134,7 +135,25 @@ func tasksV1RequestHandlerMaker(taskEngine DockerStateResolver) func(http.Respon
 		}
 		if dockerIdExists {
 			// Create TaskResponse for the docker id in the query.
-			task, found := dockerTaskEngineState.TaskById(dockerId)
+			var task *api.Task
+			var found bool
+			if len(dockerId) > dockerShortIdLen {
+				task, found = dockerTaskEngineState.TaskByID(dockerId)
+			} else {
+				tasks, _ := dockerTaskEngineState.TaskByShortID(dockerId)
+				if len(tasks) == 0 {
+					task = nil
+					found = false
+				} else if len(tasks) == 1 {
+					task = tasks[0]
+					found = true
+				} else {
+					log.Info("Multiple tasks found for requsted dockerId: " + dockerId)
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write(responseJSON)
+					return
+				}
+			}
 			responseJSON, status = createTaskJSONResponse(task, found, dockerId, dockerTaskEngineState)
 			w.WriteHeader(status)
 		} else if taskArnExists {
@@ -161,7 +180,7 @@ func licenseHandler(w http.ResponseWriter, h *http.Request) {
 	}
 }
 
-func setupServer(containerInstanceArn *string, taskEngine DockerStateResolver, cfg *config.Config) http.Server {
+func setupServer(containerInstanceArn *string, taskEngine DockerStateResolver, cfg *config.Config) *http.Server {
 	serverFunctions := map[string]func(w http.ResponseWriter, r *http.Request){
 		"/v1/metadata": metadataV1RequestHandlerMaker(containerInstanceArn, cfg),
 		"/v1/tasks":    tasksV1RequestHandlerMaker(taskEngine),
@@ -190,7 +209,7 @@ func setupServer(containerInstanceArn *string, taskEngine DockerStateResolver, c
 	loggingServeMux := http.NewServeMux()
 	loggingServeMux.Handle("/", LoggingHandler{serverMux})
 
-	server := http.Server{
+	server := &http.Server{
 		Addr:         ":" + strconv.Itoa(config.AgentIntrospectionPort),
 		Handler:      loggingServeMux,
 		ReadTimeout:  5 * time.Second,

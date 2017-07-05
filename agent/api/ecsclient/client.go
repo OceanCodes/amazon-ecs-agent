@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,7 +15,6 @@ package ecsclient
 
 import (
 	"errors"
-	"net/http"
 	"runtime"
 	"strings"
 	"time"
@@ -25,6 +24,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
+	"github.com/aws/amazon-ecs-agent/agent/httpclient"
 	"github.com/aws/amazon-ecs-agent/agent/logger"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/aws-sdk-go/aws"
@@ -53,11 +53,11 @@ type APIECSClient struct {
 	pollEndpoinCache        async.Cache
 }
 
-func NewECSClient(credentialProvider *credentials.Credentials, config *config.Config, httpClient *http.Client, ec2MetadataClient ec2.EC2MetadataClient) api.ECSClient {
+func NewECSClient(credentialProvider *credentials.Credentials, config *config.Config, ec2MetadataClient ec2.EC2MetadataClient) api.ECSClient {
 	var ecsConfig aws.Config
 	ecsConfig.Credentials = credentialProvider
 	ecsConfig.Region = &config.AWSRegion
-	ecsConfig.HTTPClient = httpClient
+	ecsConfig.HTTPClient = httpclient.New(RoundtripTimeout, config.AcceptInsecureCert)
 	if config.APIEndpoint != "" {
 		ecsConfig.Endpoint = &config.APIEndpoint
 	}
@@ -262,7 +262,7 @@ func getCpuAndMemory() (int64, int64) {
 }
 
 func (client *APIECSClient) getAdditionalAttributes() []*ecs.Attribute {
-	return []*ecs.Attribute{&ecs.Attribute{
+	return []*ecs.Attribute{{
 		Name:  aws.String("ecs.os-type"),
 		Value: aws.String(api.OSType),
 	}}
@@ -336,7 +336,7 @@ func (client *APIECSClient) SubmitContainerStateChange(change api.ContainerState
 	for i, binding := range change.PortBindings {
 		hostPort := int64(binding.HostPort)
 		containerPort := int64(binding.ContainerPort)
-		bindIP := binding.BindIp
+		bindIP := binding.BindIP
 		protocol := binding.Protocol.String()
 		networkBindings[i] = &ecs.NetworkBinding{
 			BindIP:        &bindIP,

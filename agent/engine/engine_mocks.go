@@ -1,4 +1,4 @@
-// Copyright 2015-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2015-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -22,6 +22,7 @@ import (
 	api "github.com/aws/amazon-ecs-agent/agent/api"
 	dockerclient "github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	image "github.com/aws/amazon-ecs-agent/agent/engine/image"
+	statechange "github.com/aws/amazon-ecs-agent/agent/statechange"
 	statemanager "github.com/aws/amazon-ecs-agent/agent/statemanager"
 	go_dockerclient "github.com/fsouza/go-dockerclient"
 	gomock "github.com/golang/mock/gomock"
@@ -136,15 +137,14 @@ func (_mr *_MockTaskEngineRecorder) SetSaver(arg0 interface{}) *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "SetSaver", arg0)
 }
 
-func (_m *MockTaskEngine) TaskEvents() (<-chan api.TaskStateChange, <-chan api.ContainerStateChange) {
-	ret := _m.ctrl.Call(_m, "TaskEvents")
-	ret0, _ := ret[0].(<-chan api.TaskStateChange)
-	ret1, _ := ret[1].(<-chan api.ContainerStateChange)
-	return ret0, ret1
+func (_m *MockTaskEngine) StateChangeEvents() <-chan statechange.Event {
+	ret := _m.ctrl.Call(_m, "StateChangeEvents")
+	ret0, _ := ret[0].(<-chan statechange.Event)
+	return ret0
 }
 
-func (_mr *_MockTaskEngineRecorder) TaskEvents() *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "TaskEvents")
+func (_mr *_MockTaskEngineRecorder) StateChangeEvents() *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "StateChangeEvents")
 }
 
 func (_m *MockTaskEngine) UnmarshalJSON(_param0 []byte) error {

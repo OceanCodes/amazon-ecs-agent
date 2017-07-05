@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -52,7 +52,7 @@ func (authProvider *ecrAuthProvider) GetAuthconfig(image string) (docker.AuthCon
 		return docker.AuthConfiguration{}, fmt.Errorf("ecrAuthProvider cannot be used without AuthData")
 	}
 	log.Debugf("Calling ECR.GetAuthorizationToken for %s", image)
-	authData, err := authProvider.client.GetAuthorizationToken(authProvider.authData.RegistryId)
+	authData, err := authProvider.client.GetAuthorizationToken(authProvider.authData.RegistryID)
 	if err != nil {
 		return docker.AuthConfiguration{}, err
 	}
