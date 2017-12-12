@@ -1,5 +1,5 @@
 // +build windows
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -23,6 +23,9 @@ import (
 )
 
 const (
+	// AgentCredentialsAddress is used to serve the credentials for tasks.
+	AgentCredentialsAddress = "127.0.0.1"
+	// defaultAuditLogFile specifies the default audit log filename
 	defaultCredentialsAuditLogFile = `log\audit.log`
 	// When using IAM roles for tasks on Windows, the credential proxy consumes port 80
 	httpPort = 80
@@ -44,6 +47,7 @@ const (
 func DefaultConfig() Config {
 	programData := utils.DefaultIfBlank(os.Getenv("ProgramData"), `C:\ProgramData`)
 	ecsRoot := filepath.Join(programData, "Amazon", "ECS")
+	dataDir := filepath.Join(ecsRoot, "data")
 	return Config{
 		DockerEndpoint: "npipe:////./pipe/docker_engine",
 		ReservedPorts: []uint16{
@@ -59,11 +63,12 @@ func DefaultConfig() Config {
 			netBIOSPort,
 		},
 		ReservedPortsUDP: []uint16{},
-		DataDir:          filepath.Join(ecsRoot, "data"),
-		// DisableMetrics is set to true on Windows as docker stats does not work
-		DisableMetrics:              true,
+		DataDir:          dataDir,
+		// DataDirOnHost is identical to DataDir for Windows because we do not
+		// run as a container
+		DataDirOnHost:               dataDir,
 		ReservedMemory:              0,
-		AvailableLoggingDrivers:     []dockerclient.LoggingDriver{dockerclient.JsonFileDriver},
+		AvailableLoggingDrivers:     []dockerclient.LoggingDriver{dockerclient.JSONFileDriver, dockerclient.NoneDriver},
 		TaskCleanupWaitDuration:     DefaultTaskCleanupWaitDuration,
 		DockerStopTimeout:           DefaultDockerStopTimeout,
 		CredentialsAuditLogFile:     filepath.Join(ecsRoot, defaultCredentialsAuditLogFile),
@@ -72,16 +77,27 @@ func DefaultConfig() Config {
 		MinimumImageDeletionAge:     DefaultImageDeletionAge,
 		ImageCleanupInterval:        DefaultImageCleanupTimeInterval,
 		NumImagesToDeletePerCycle:   DefaultNumImagesToDeletePerCycle,
+		ContainerMetadataEnabled:    false,
+		TaskCPUMemLimit:             ExplicitlyDisabled,
 	}
 }
 
-func (config *Config) platformOverrides() {
+func (cfg *Config) platformOverrides() {
 	// Enabling task IAM roles for Windows requires the credential proxy to run on port 80,
 	// so we reserve this port by default when that happens.
-	if config.TaskIAMRoleEnabled {
-		if config.ReservedPorts == nil {
-			config.ReservedPorts = []uint16{}
+	if cfg.TaskIAMRoleEnabled {
+		if cfg.ReservedPorts == nil {
+			cfg.ReservedPorts = []uint16{}
 		}
-		config.ReservedPorts = append(config.ReservedPorts, httpPort)
+		cfg.ReservedPorts = append(cfg.ReservedPorts, httpPort)
 	}
+
+	// ensure TaskResourceLimit is disabled
+	cfg.TaskCPUMemLimit = ExplicitlyDisabled
+}
+
+// platformString returns platform-specific config data that can be serialized
+// to string for debugging
+func (cfg *Config) platformString() string {
+	return ""
 }

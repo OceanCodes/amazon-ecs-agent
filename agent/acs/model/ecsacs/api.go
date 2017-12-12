@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -48,6 +48,34 @@ func (s AckRequest) String() string {
 
 // GoString returns the string representation
 func (s AckRequest) GoString() string {
+	return s.String()
+}
+
+type AttachTaskNetworkInterfacesMessage struct {
+	_ struct{} `type:"structure"`
+
+	ClusterArn *string `locationName:"clusterArn" type:"string"`
+
+	ContainerInstanceArn *string `locationName:"containerInstanceArn" type:"string"`
+
+	ElasticNetworkInterfaces []*ElasticNetworkInterface `locationName:"elasticNetworkInterfaces" type:"list"`
+
+	GeneratedAt *int64 `locationName:"generatedAt" type:"long"`
+
+	MessageId *string `locationName:"messageId" type:"string"`
+
+	TaskArn *string `locationName:"taskArn" type:"string"`
+
+	WaitTimeoutMs *int64 `locationName:"waitTimeoutMs" type:"long"`
+}
+
+// String returns the string representation
+func (s AttachTaskNetworkInterfacesMessage) String() string {
+	return awsutil.Prettify(s)
+}
+
+// GoString returns the string representation
+func (s AttachTaskNetworkInterfacesMessage) GoString() string {
 	return s.String()
 }
 
@@ -102,6 +130,8 @@ type Container struct {
 
 	Links []*string `locationName:"links" type:"list"`
 
+	LogsAuthStrategy *string `locationName:"logsAuthStrategy" type:"string" enum:"AuthStrategy"`
+
 	Memory *int64 `locationName:"memory" type:"integer"`
 
 	MountPoints []*MountPoint `locationName:"mountPoints" type:"list"`
@@ -155,6 +185,8 @@ type ECRAuthData struct {
 	Region *string `locationName:"region" type:"string"`
 
 	RegistryId *string `locationName:"registryId" type:"string"`
+
+	UseExecutionRole *bool `locationName:"useExecutionRole" type:"boolean"`
 }
 
 // String returns the string representation
@@ -164,6 +196,34 @@ func (s ECRAuthData) String() string {
 
 // GoString returns the string representation
 func (s ECRAuthData) GoString() string {
+	return s.String()
+}
+
+type ElasticNetworkInterface struct {
+	_ struct{} `type:"structure"`
+
+	AttachmentArn *string `locationName:"attachmentArn" type:"string"`
+
+	DomainName []*string `locationName:"domainName" type:"list"`
+
+	DomainNameServers []*string `locationName:"domainNameServers" type:"list"`
+
+	Ec2Id *string `locationName:"ec2Id" type:"string"`
+
+	Ipv4Addresses []*IPv4AddressAssignment `locationName:"ipv4Addresses" type:"list"`
+
+	Ipv6Addresses []*IPv6AddressAssignment `locationName:"ipv6Addresses" type:"list"`
+
+	MacAddress *string `locationName:"macAddress" type:"string"`
+}
+
+// String returns the string representation
+func (s ElasticNetworkInterface) String() string {
+	return awsutil.Prettify(s)
+}
+
+// GoString returns the string representation
+func (s ElasticNetworkInterface) GoString() string {
 	return s.String()
 }
 
@@ -296,6 +356,8 @@ type IAMRoleCredentialsMessage struct {
 
 	RoleCredentials *IAMRoleCredentials `locationName:"roleCredentials" type:"structure"`
 
+	RoleType *string `locationName:"roleType" type:"string" enum:"RoleType"`
+
 	TaskArn *string `locationName:"taskArn" type:"string"`
 }
 
@@ -306,6 +368,40 @@ func (s IAMRoleCredentialsMessage) String() string {
 
 // GoString returns the string representation
 func (s IAMRoleCredentialsMessage) GoString() string {
+	return s.String()
+}
+
+type IPv4AddressAssignment struct {
+	_ struct{} `type:"structure"`
+
+	Primary *bool `locationName:"primary" type:"boolean"`
+
+	PrivateAddress *string `locationName:"privateAddress" type:"string"`
+}
+
+// String returns the string representation
+func (s IPv4AddressAssignment) String() string {
+	return awsutil.Prettify(s)
+}
+
+// GoString returns the string representation
+func (s IPv4AddressAssignment) GoString() string {
+	return s.String()
+}
+
+type IPv6AddressAssignment struct {
+	_ struct{} `type:"structure"`
+
+	Address *string `locationName:"address" type:"string"`
+}
+
+// String returns the string representation
+func (s IPv6AddressAssignment) String() string {
+	return awsutil.Prettify(s)
+}
+
+// GoString returns the string representation
+func (s IPv6AddressAssignment) GoString() string {
 	return s.String()
 }
 
@@ -554,9 +650,17 @@ type Task struct {
 
 	Containers []*Container `locationName:"containers" type:"list"`
 
+	Cpu *float64 `locationName:"cpu" type:"double"`
+
 	DesiredStatus *string `locationName:"desiredStatus" type:"string"`
 
+	ElasticNetworkInterfaces []*ElasticNetworkInterface `locationName:"elasticNetworkInterfaces" type:"list"`
+
+	ExecutionRoleCredentials *IAMRoleCredentials `locationName:"executionRoleCredentials" type:"structure"`
+
 	Family *string `locationName:"family" type:"string"`
+
+	Memory *int64 `locationName:"memory" type:"integer"`
 
 	Overrides *string `locationName:"overrides" type:"string"`
 

@@ -1,6 +1,6 @@
 // +build functional
 
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -114,8 +114,9 @@ type AgentOptions struct {
 	PortBindings     map[docker.Port]map[string]string
 }
 
-// PLatform Independent piece of Agent Startup. Gets executed on both linux and Windows.
-func (agent *TestAgent) platformIndependentStartAgent() error {
+// verifyIntrospectionAPI verifies that we can talk to the agent's introspection http endpoint.
+// This is a platform-independent piece of Agent Startup.
+func (agent *TestAgent) verifyIntrospectionAPI() error {
 	// Wait up to 10s for it to register
 	var localMetadata handlers.MetadataResponse
 	for i := 0; i < 10; i++ {
@@ -265,36 +266,36 @@ func DeleteCluster(t *testing.T, clusterName string) {
 
 // VerifyMetrics whether the response is as expected
 // the expected value can be 0 or positive
-func VerifyMetrics(cwclient *cloudwatch.CloudWatch, params *cloudwatch.GetMetricStatisticsInput, idleCluster bool) error {
+func VerifyMetrics(cwclient *cloudwatch.CloudWatch, params *cloudwatch.GetMetricStatisticsInput, idleCluster bool) (*cloudwatch.Datapoint, error) {
 	resp, err := cwclient.GetMetricStatistics(params)
 	if err != nil {
-		return fmt.Errorf("Error getting metrics of cluster: %v", err)
+		return nil, fmt.Errorf("Error getting metrics of cluster: %v", err)
 	}
 
 	if resp == nil || resp.Datapoints == nil {
-		return fmt.Errorf("Cloudwatch get metrics failed, returned null")
+		return nil, fmt.Errorf("Cloudwatch get metrics failed, returned null")
 	}
 	metricsCount := len(resp.Datapoints)
 	if metricsCount == 0 {
-		return fmt.Errorf("No datapoints returned")
+		return nil, fmt.Errorf("No datapoints returned")
 	}
 
 	datapoint := resp.Datapoints[metricsCount-1]
 	// Samplecount is always expected to be "1" for cluster metrics
 	if *datapoint.SampleCount != 1.0 {
-		return fmt.Errorf("Incorrect SampleCount %f, expected 1", *datapoint.SampleCount)
+		return nil, fmt.Errorf("Incorrect SampleCount %f, expected 1", *datapoint.SampleCount)
 	}
 
 	if idleCluster {
 		if *datapoint.Average != 0.0 {
-			return fmt.Errorf("non-zero utilization for idle cluster")
+			return nil, fmt.Errorf("non-zero utilization for idle cluster")
 		}
 	} else {
 		if *datapoint.Average == 0.0 {
-			return fmt.Errorf("utilization is zero for non-idle cluster")
+			return nil, fmt.Errorf("utilization is zero for non-idle cluster")
 		}
 	}
-	return nil
+	return datapoint, nil
 }
 
 // ResolveTaskDockerID determines the Docker ID for a container within a given
@@ -391,6 +392,17 @@ func (agent *TestAgent) waitRunningViaIntrospection(task *TestTask) (bool, error
 	} else {
 		return false, errors.New("Task should be RUNNING but is " + taskResp.KnownStatus)
 	}
+}
+
+func (agent *TestAgent) CallTaskIntrospectionAPI(task *TestTask) (*handlers.TaskResponse, error) {
+	rawResponse, err := agent.callTaskIntrospectionApi(*task.TaskArn)
+	if err != nil {
+		return nil, err
+	}
+
+	var taskResp handlers.TaskResponse
+	err = json.Unmarshal(*rawResponse, &taskResp)
+	return &taskResp, err
 }
 
 func (agent *TestAgent) callTaskIntrospectionApi(taskArn string) (*[]byte, error) {

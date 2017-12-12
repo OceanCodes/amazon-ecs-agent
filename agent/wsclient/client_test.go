@@ -15,8 +15,11 @@ package wsclient
 
 import (
 	"io"
+	"net/url"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
 	"github.com/aws/amazon-ecs-agent/agent/config"
@@ -28,6 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const dockerEndpoint = "/var/run/docker.sock"
@@ -39,29 +43,37 @@ func TestConcurrentWritesDontPanic(t *testing.T) {
 	closeWS := make(chan []byte)
 	defer close(closeWS)
 
-	mockServer, _, requests, _, _ := mockwsutils.StartMockServer(t, closeWS)
+	mockServer, _, requests, _, _ := utils.GetMockServer(closeWS)
+	mockServer.StartTLS()
 	defer mockServer.Close()
 
+	var waitForRequests sync.WaitGroup
+	waitForRequests.Add(1)
+
+	go func() {
+		for i := 0; i < 20; i++ {
+			<-requests
+		}
+		waitForRequests.Done()
+	}()
 	req := ecsacs.AckRequest{Cluster: aws.String("test"), ContainerInstance: aws.String("test"), MessageId: aws.String("test")}
 
 	cs := getClientServer(mockServer.URL)
-	cs.Connect()
+	require.NoError(t, cs.Connect())
 
 	executeTenRequests := func() {
 		for i := 0; i < 10; i++ {
-			cs.MakeRequest(&req)
+			assert.NoError(t, cs.MakeRequest(&req))
 		}
 	}
 
 	// Make requests from two separate routines to try and force a
 	// concurrent write
 	go executeTenRequests()
-	executeTenRequests()
+	go executeTenRequests()
 
 	t.Log("Waiting for all 20 requests to succeed")
-	for i := 0; i < 20; i++ {
-		<-requests
-	}
+	waitForRequests.Wait()
 }
 
 // TestProxyVariableCustomValue ensures that a user is able to override the
@@ -70,12 +82,13 @@ func TestProxyVariableCustomValue(t *testing.T) {
 	closeWS := make(chan []byte)
 	defer close(closeWS)
 
-	mockServer, _, _, _, _ := mockwsutils.StartMockServer(t, closeWS)
+	mockServer, _, _, _, _ := utils.GetMockServer(closeWS)
+	mockServer.StartTLS()
 	defer mockServer.Close()
 
 	testString := "Custom no proxy string"
 	os.Setenv("NO_PROXY", testString)
-	getClientServer(mockServer.URL).Connect()
+	require.NoError(t, getClientServer(mockServer.URL).Connect())
 
 	assert.Equal(t, os.Getenv("NO_PROXY"), testString, "NO_PROXY should match user-supplied variable")
 }
@@ -86,7 +99,8 @@ func TestProxyVariableDefaultValue(t *testing.T) {
 	closeWS := make(chan []byte)
 	defer close(closeWS)
 
-	mockServer, _, _, _, _ := mockwsutils.StartMockServer(t, closeWS)
+	mockServer, _, _, _, _ := utils.GetMockServer(closeWS)
+	mockServer.StartTLS()
 	defer mockServer.Close()
 
 	os.Unsetenv("NO_PROXY")
@@ -104,9 +118,10 @@ func TestHandleMessagePermissibleCloseCode(t *testing.T) {
 	defer close(closeWS)
 
 	messageError := make(chan error)
-	mockServer, _, _, _, _ := mockwsutils.StartMockServer(t, closeWS)
+	mockServer, _, _, _, _ := utils.GetMockServer(closeWS)
+	mockServer.StartTLS()
 	cs := getClientServer(mockServer.URL)
-	cs.Connect()
+	require.NoError(t, cs.Connect())
 
 	go func() {
 		messageError <- cs.ConsumeMessages()
@@ -123,9 +138,10 @@ func TestHandleMessageUnexpectedCloseCode(t *testing.T) {
 	defer close(closeWS)
 
 	messageError := make(chan error)
-	mockServer, _, _, _, _ := mockwsutils.StartMockServer(t, closeWS)
+	mockServer, _, _, _, _ := utils.GetMockServer(closeWS)
+	mockServer.StartTLS()
 	cs := getClientServer(mockServer.URL)
-	cs.Connect()
+	require.NoError(t, cs.Connect())
 
 	go func() {
 		messageError <- cs.ConsumeMessages()
@@ -133,6 +149,66 @@ func TestHandleMessageUnexpectedCloseCode(t *testing.T) {
 
 	closeWS <- websocket.FormatCloseMessage(websocket.CloseTryAgainLater, ":(")
 	assert.True(t, websocket.IsCloseError(<-messageError, websocket.CloseTryAgainLater), "Expected error from websocket library")
+}
+
+// TestHandlNonHTTPSEndpoint verifies that the wsclient can handle communication over
+// an HTTP (so WS) connection
+func TestHandleNonHTTPSEndpoint(t *testing.T) {
+	closeWS := make(chan []byte)
+	defer close(closeWS)
+
+	mockServer, _, requests, _, _ := utils.GetMockServer(closeWS)
+	mockServer.Start()
+	defer mockServer.Close()
+
+	cs := getClientServer(mockServer.URL)
+	require.NoError(t, cs.Connect())
+
+	req := ecsacs.AckRequest{Cluster: aws.String("test"), ContainerInstance: aws.String("test"), MessageId: aws.String("test")}
+	cs.MakeRequest(&req)
+
+	t.Log("Waiting for single request to be visible server-side")
+	<-requests
+}
+
+// TestHandleIncorrectHttpScheme checks that an incorrect URL scheme results in
+// an error
+func TestHandleIncorrectURLScheme(t *testing.T) {
+	closeWS := make(chan []byte)
+	defer close(closeWS)
+
+	mockServer, _, _, _, _ := utils.GetMockServer(closeWS)
+	mockServer.StartTLS()
+	defer mockServer.Close()
+
+	mockServerURL, _ := url.Parse(mockServer.URL)
+	mockServerURL.Scheme = "notaparticularlyrealscheme"
+
+	cs := getClientServer(mockServerURL.String())
+	err := cs.Connect()
+
+	assert.Error(t, err, "Expected error for incorrect URL scheme")
+}
+
+// TestWebsocketScheme checks that websocketScheme handles valid and invalid mappings
+// correctly
+func TestWebsocketScheme(t *testing.T) {
+	// test valid schemes
+	validMappings := map[string]string{
+		"http":  "ws",
+		"https": "wss",
+	}
+
+	for input, expectedOutput := range validMappings {
+		actualOutput, err := websocketScheme(input)
+
+		assert.NoError(t, err, "Unexpected error for valid http scheme")
+		assert.Equal(t, actualOutput, expectedOutput, "Valid http schemes should map to a websocket scheme")
+	}
+
+	// test an invalid mapping
+	_, err := websocketScheme("highly-likely-to-be-junk")
+	assert.Error(t, err, "Expected error for invalid http scheme")
 }
 
 func getClientServer(url string) *ClientServerImpl {
@@ -147,5 +223,6 @@ func getClientServer(url string) *ClientServerImpl {
 		},
 		CredentialProvider: credentials.AnonymousCredentials,
 		TypeDecoder:        BuildTypeDecoder(types),
+		RWTimeout:          time.Second,
 	}
 }

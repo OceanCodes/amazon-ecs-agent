@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -13,22 +13,42 @@
 
 package ec2
 
-import "errors"
+import (
+	"errors"
 
-type blackholeMetadataClientImpl struct{}
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+)
+
+type blackholeMetadataClient struct{}
 
 func NewBlackholeEC2MetadataClient() EC2MetadataClient {
-	return blackholeMetadataClientImpl{}
+	return blackholeMetadataClient{}
 }
 
-func (blackholeMetadataClientImpl) DefaultCredentials() (*RoleCredentials, error) {
+func (blackholeMetadataClient) DefaultCredentials() (*RoleCredentials, error) {
 	return nil, errors.New("blackholed")
 }
 
-func (blackholeMetadataClientImpl) InstanceIdentityDocument() (*InstanceIdentityDocument, error) {
-	return nil, errors.New("blackholed")
+func (blackholeMetadataClient) InstanceIdentityDocument() (ec2metadata.EC2InstanceIdentityDocument, error) {
+	return ec2metadata.EC2InstanceIdentityDocument{}, errors.New("blackholed")
 }
 
-func (blackholeMetadataClientImpl) ReadResource(path string) ([]byte, error) {
-	return nil, errors.New("blackholed")
+func (blackholeMetadataClient) PrimaryENIMAC() (string, error) {
+	return "", errors.New("blackholed")
+}
+
+func (blackholeMetadataClient) VPCID(mac string) (string, error) {
+	return "", errors.New("blackholed")
+}
+
+func (blackholeMetadataClient) SubnetID(mac string) (string, error) {
+	return "", errors.New("blackholed")
+}
+
+func (blackholeMetadataClient) GetMetadata(path string) (string, error) {
+	return "", errors.New("blackholed")
+}
+
+func (blackholeMetadataClient) GetDynamicData(path string) (string, error) {
+	return "", errors.New("blackholed")
 }

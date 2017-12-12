@@ -1,6 +1,6 @@
 // +build windows,functional
 
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -18,15 +18,22 @@ package functional_tests
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	ecsapi "github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	. "github.com/aws/amazon-ecs-agent/agent/functional_tests/util"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
+	"github.com/pborman/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -36,19 +43,18 @@ const (
 	logDriverTaskDefinition         = "logdriver-jsonfile-windows"
 	cleanupTaskDefinition           = "cleanup-windows"
 	networkModeTaskDefinition       = "network-mode-windows"
+	cpuSharesPerCore                = 1024
 )
 
-// TestAwslogsDriver verifies that container logs are sent to Amazon CloudWatch Logs with awslogs as the log driver
-func TestAwslogsDriver(t *testing.T) {
+// TestAWSLogsDriver verifies that container logs are sent to Amazon CloudWatch Logs with awslogs as the log driver
+func TestAWSLogsDriver(t *testing.T) {
 	RequireDockerVersion(t, ">=1.9.0") // awslogs drivers available from docker 1.9.0
 	cwlClient := cloudwatchlogs.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
 	// Test whether the log group existed or not
 	respDescribeLogGroups, err := cwlClient.DescribeLogGroups(&cloudwatchlogs.DescribeLogGroupsInput{
 		LogGroupNamePrefix: aws.String(awslogsLogGroupName),
 	})
-	if err != nil {
-		t.Fatalf("CloudWatchLogs describe log groups error: %v", err)
-	}
+	require.NoError(t, err, "CloudWatchLogs describe log groups failed")
 	logGroupExists := false
 	for i := 0; i < len(respDescribeLogGroups.LogGroups); i++ {
 		if *respDescribeLogGroups.LogGroups[i].LogGroupName == awslogsLogGroupName {
@@ -61,9 +67,7 @@ func TestAwslogsDriver(t *testing.T) {
 		_, err := cwlClient.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
 			LogGroupName: aws.String(awslogsLogGroupName),
 		})
-		if err != nil {
-			t.Fatalf("Failed to create log group %s : %v", awslogsLogGroupName, err)
-		}
+		require.NoError(t, err, "Failed to create log group %s", awslogsLogGroupName)
 	}
 
 	agentOptions := AgentOptions{
@@ -79,9 +83,7 @@ func TestAwslogsDriver(t *testing.T) {
 	tdOverrides["$$$TEST_REGION$$$"] = *ECS.Config.Region
 
 	testTask, err := agent.StartTaskWithTaskDefinitionOverrides(t, "awslogs-windows", tdOverrides)
-	if err != nil {
-		t.Fatalf("Expected to start task using awslogs driver failed: %v", err)
-	}
+	require.NoError(t, err, "Expected to start task using awslogs driver failed")
 
 	// Wait for the container to start
 	testTask.WaitRunning(waitTaskStateChangeDuration)
@@ -102,14 +104,10 @@ func TestAwslogsDriver(t *testing.T) {
 		LogGroupName:  aws.String(awslogsLogGroupName),
 		LogStreamName: aws.String(fmt.Sprintf("ecs-functional-tests/awslogs/%s", taskId)),
 	}
-	resp, err := cwlClient.GetLogEvents(params)
-	if err != nil {
-		t.Fatalf("CloudWatchLogs get log failed: %v", err)
-	}
 
-	if len(resp.Events) != 1 {
-		t.Errorf("Get number of log events: %d", len(resp.Events))
-	}
+	resp, err := waitCloudwatchLogs(cwlClient, params)
+	require.NoError(t, err, "CloudWatchLogs get log failed")
+	assert.Len(t, resp.Events, 1, fmt.Sprintf("Get unexpected number of log events: %d", len(resp.Events)))
 }
 
 func TestTaskIamRolesDefaultNetworkMode(t *testing.T) {
@@ -179,7 +177,7 @@ func taskIamRolesTest(networkMode string, agent *TestAgent, t *testing.T) {
 	}
 
 	// Task will only run one command "aws ec2 describe-regions"
-	err = task.WaitStopped(2 * time.Minute)
+	err = task.WaitStopped(waitTaskStateChangeDuration)
 	if err != nil {
 		t.Fatalf("Waiting task to stop error : %v", err)
 	}
@@ -193,4 +191,144 @@ func taskIamRolesTest(networkMode string, agent *TestAgent, t *testing.T) {
 		t.Fatalf("Container exit code non-zero: %v", containerMetaData.State.ExitCode)
 	}
 
+}
+
+// TestMetadataServiceValidator Tests that the metadata file can be accessed from the
+// container using the ECS_CONTAINER_METADATA_FILE environment variables
+func TestMetadataServiceValidator(t *testing.T) {
+	agentOptions := &AgentOptions{
+		ExtraEnvironment: map[string]string{
+			"ECS_ENABLE_CONTAINER_METADATA": "true",
+		},
+	}
+
+	agent := RunAgent(t, agentOptions)
+	defer agent.Cleanup()
+
+	tdOverride := make(map[string]string)
+	tdOverride["$$$TEST_REGION$$$"] = *ECS.Config.Region
+	tdOverride["$$$NETWORK_MODE$$$"] = ""
+
+	task, err := agent.StartTaskWithTaskDefinitionOverrides(t, "mdservice-validator-windows", tdOverride)
+	if err != nil {
+		t.Fatalf("Error starting mdservice-validator-windows: %v", err)
+	}
+
+	// clean up
+	err = task.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, err, "Error waiting for task to transition to STOPPED")
+
+	containerID, err := agent.ResolveTaskDockerID(task, "mdservice-validator-windows")
+	if err != nil {
+		t.Fatalf("Error resolving docker id for container in task: %v", err)
+	}
+
+	containerMetaData, err := agent.DockerClient.InspectContainer(containerID)
+	require.NoError(t, err, "Could not inspect container for task")
+
+	exitCode := containerMetaData.State.ExitCode
+	assert.Equal(t, 42, exitCode, fmt.Sprintf("Expected exit code of 42; got %d", exitCode))
+}
+
+// TestTelemetry tests whether agent can send metrics to TACS
+func TestTelemetry(t *testing.T) {
+	// Try to use a new cluster for this test, ensure no other task metrics for this cluster
+	newClusterName := "ecstest-telemetry-" + uuid.New()
+	_, err := ECS.CreateCluster(&ecsapi.CreateClusterInput{
+		ClusterName: aws.String(newClusterName),
+	})
+	require.NoError(t, err, "Failed to create cluster")
+	defer DeleteCluster(t, newClusterName)
+
+	agentOptions := AgentOptions{
+		ExtraEnvironment: map[string]string{
+			"ECS_CLUSTER": newClusterName,
+		},
+	}
+	agent := RunAgent(t, &agentOptions)
+	defer agent.Cleanup()
+
+	params := &cloudwatch.GetMetricStatisticsInput{
+		MetricName: aws.String("CPUUtilization"),
+		Namespace:  aws.String("AWS/ECS"),
+		Period:     aws.Int64(60),
+		Statistics: []*string{
+			aws.String("Average"),
+			aws.String("SampleCount"),
+		},
+		Dimensions: []*cloudwatch.Dimension{
+			{
+				Name:  aws.String("ClusterName"),
+				Value: aws.String(newClusterName),
+			},
+		},
+	}
+	params.StartTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
+	params.EndTime = aws.Time((*params.StartTime).Add(waitMetricsInCloudwatchDuration).UTC())
+	// wait for the agent start and ensure no task is running
+	time.Sleep(waitMetricsInCloudwatchDuration)
+
+	cwclient := cloudwatch.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
+	_, err = VerifyMetrics(cwclient, params, true)
+	assert.NoError(t, err, "Before task running, verify metrics for CPU utilization failed")
+
+	params.MetricName = aws.String("MemoryUtilization")
+	_, err = VerifyMetrics(cwclient, params, true)
+	assert.NoError(t, err, "Before task running, verify metrics for memory utilization failed")
+
+	cpuNum := runtime.NumCPU()
+
+	tdOverrides := make(map[string]string)
+	// Set the container cpu percentage 25%
+	tdOverrides["$$$$CPUSHARE$$$$"] = strconv.Itoa(int(float64(cpuNum*cpuSharesPerCore) * 0.25))
+
+	testTask, err := agent.StartTaskWithTaskDefinitionOverrides(t, "telemetry-windows", tdOverrides)
+	require.NoError(t, err, "Failed to start telemetry task")
+	// Wait for the task to run and the agent to send back metrics
+	err = testTask.WaitRunning(waitTaskStateChangeDuration)
+	require.NoError(t, err, "Error wait telemetry task running")
+
+	time.Sleep(waitMetricsInCloudwatchDuration)
+	params.EndTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
+	params.StartTime = aws.Time((*params.EndTime).Add(-waitMetricsInCloudwatchDuration).UTC())
+	params.MetricName = aws.String("CPUUtilization")
+	metrics, err := VerifyMetrics(cwclient, params, false)
+	assert.NoError(t, err, "Task is running, verify metrics for CPU utilization failed")
+	// Also verify the cpu usage is around 25%
+	assert.InDelta(t, 0.25, *metrics.Average, 0.05)
+
+	params.MetricName = aws.String("MemoryUtilization")
+	_, err = VerifyMetrics(cwclient, params, false)
+	assert.NoError(t, err, "Task is running, verify metrics for memory utilization failed")
+
+	err = testTask.Stop()
+	require.NoError(t, err, "Failed to stop the telemetry task")
+
+	err = testTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, err, "Waiting for task stop failed")
+
+	time.Sleep(waitMetricsInCloudwatchDuration)
+	params.EndTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
+	params.StartTime = aws.Time((*params.EndTime).Add(-waitMetricsInCloudwatchDuration).UTC())
+	params.MetricName = aws.String("CPUUtilization")
+	_, err = VerifyMetrics(cwclient, params, true)
+	assert.NoError(t, err, "Task stopped: verify metrics for CPU utilization failed")
+
+	params.MetricName = aws.String("MemoryUtilization")
+	_, err = VerifyMetrics(cwclient, params, true)
+	assert.NoError(t, err, "Task stopped, verify metrics for memory utilization failed")
+}
+
+// TestOOMContainer verifies that an OOM container returns an error
+func TestOOMContainer(t *testing.T) {
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	testTask, err := agent.StartTask(t, "oom-windows")
+	require.NoError(t, err, "Expected to start invalid-image task")
+	err = testTask.WaitRunning(waitTaskStateChangeDuration)
+	assert.NoError(t, err, "Expect task to be running")
+	err = testTask.WaitStopped(waitTaskStateChangeDuration)
+	assert.NoError(t, err, "Expect task to be stopped")
+	assert.NotEqual(t, 0, testTask.Containers[0].ExitCode, "container should fail with memory error")
 }

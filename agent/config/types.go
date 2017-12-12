@@ -14,10 +14,10 @@
 package config
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 )
 
 type Config struct {
@@ -51,8 +51,12 @@ type Config struct {
 	ReservedPortsUDP []uint16
 
 	// DataDir is the directory data is saved to in order to preserve state
-	// across agent restarts. It is only used if "Checkpoint" is true as well.
+	// across agent restarts.
+	// It is also used to keep the metadata of containers managed by the agent
 	DataDir string
+	// DataDirOnHost is the directory in the instance from which we mount
+	// DataDir to the ecs-agent container and to agent managed containers
+	DataDirOnHost string
 	// Checkpoint configures whether data should be periodically to a checkpoint
 	// file, in DataDir, such that on instance or agent restarts it will resume
 	// as the same ContainerInstance. It defaults to false.
@@ -86,7 +90,7 @@ type Config struct {
 	DockerStopTimeout time.Duration
 
 	// AvailableLoggingDrivers specifies the logging drivers available for use
-	// with Docker.  If not set, it defaults to ["json-file"].
+	// with Docker.  If not set, it defaults to ["json-file","none"].
 	AvailableLoggingDrivers []dockerclient.LoggingDriver
 
 	// PrivilegedDisabled specified whether the Agent is capable of launching
@@ -109,6 +113,9 @@ type Config struct {
 	// tasks with IAM Roles.
 	TaskIAMRoleEnabled bool
 
+	// TaskCPUMemLimit specifies if Agent can launch a task with a hierarchical cgroup
+	TaskCPUMemLimit Conditional
+
 	// CredentialsAuditLogFile specifies the path/filename of the audit log.
 	CredentialsAuditLogFile string
 
@@ -118,6 +125,10 @@ type Config struct {
 	// TaskIAMRoleEnabledForNetworkHost specifies if the Agent is capable of launching
 	// tasks with IAM Roles when networkMode is set to 'host'
 	TaskIAMRoleEnabledForNetworkHost bool
+
+	// TaskENIEnabled specifies if the Agent is capable of launching task within
+	// defined EC2 networks
+	TaskENIEnabled bool
 
 	// ImageCleanupDisabled specifies whether the Agent will periodically perform
 	// automated image cleanup
@@ -143,43 +154,44 @@ type Config struct {
 
 	// Set if clients validate ssl certificates. Used mainly for testing
 	AcceptInsecureCert bool `json:"-"`
-}
 
-// SensitiveRawMessage is a struct to store some data that should not be logged
-// or printed.
-// This struct is a Stringer which will not print its contents with 'String'.
-// It is a json.Marshaler and json.Unmarshaler and will present its actual
-// contents in plaintext when read/written from/to json.
-type SensitiveRawMessage struct {
-	contents json.RawMessage
-}
+	// CNIPluginsPath is the path for the cni plugins
+	CNIPluginsPath string
 
-// NewSensitiveRawMessage returns a new encapsulated json.RawMessage or nil if
-// the data is empty. It cannot be accidentally logged via .String/.GoString/%v/%#v
-func NewSensitiveRawMessage(data json.RawMessage) *SensitiveRawMessage {
-	if len(data) == 0 {
-		return nil
-	}
-	return &SensitiveRawMessage{contents: data}
-}
+	// PauseContainerTarballPath is the path to the pause container tarball
+	PauseContainerTarballPath string
 
-func (data SensitiveRawMessage) String() string {
-	return "[redacted]"
-}
+	// PauseContainerImageName is the name for the pause container image.
+	// Setting this value to be different from the default will disable loading
+	// the image from the tarball; the referenced image must already be loaded.
+	PauseContainerImageName string
 
-func (data SensitiveRawMessage) GoString() string {
-	return "[redacted]"
-}
+	// PauseContainerTag is the tag for the pause container image.
+	// Setting this value to be different from the default will disable loading
+	// the image from the tarball; the referenced image must already be loaded.
+	PauseContainerTag string
 
-func (data SensitiveRawMessage) Contents() json.RawMessage {
-	return data.contents
-}
+	// AWSVPCBlockInstanceMetdata specifies if InstanceMetadata endpoint should be blocked
+	// for tasks that are launched with network mode "awsvpc" when ECS_AWSVPC_BLOCK_IMDS=true
+	AWSVPCBlockInstanceMetdata bool
 
-func (data SensitiveRawMessage) MarshalJSON() ([]byte, error) {
-	return data.contents, nil
-}
+	// OverrideAWSVPCLocalIPv4Address overrides the local IPv4 address chosen
+	// for a task using the `awsvpc` networking mode. Using this configuration
+	// will limit you to running one `awsvpc` task at a time. IPv4 addresses
+	// must be specified in decimal-octet form and also specify the subnet
+	// size (e.g., "169.254.172.42/22").
+	OverrideAWSVPCLocalIPv4Address *cnitypes.IPNet
 
-func (data *SensitiveRawMessage) UnmarshalJSON(jsonData []byte) error {
-	data.contents = json.RawMessage(jsonData)
-	return nil
+	// AWSVPCAdditionalLocalRoutes allows the specification of routing table
+	// entries that will be added in the task's network namespace via the
+	// instance bridge interface rather than via the ENI.
+	AWSVPCAdditionalLocalRoutes []cnitypes.IPNet
+
+	// ContainerMetadataEnabled specifies if the agent should provide a metadata
+	// file for containers.
+	ContainerMetadataEnabled bool
+
+	// OverrideAWSLogsExecutionRole is config option used to enable awslogs
+	// driver authentication over the task's execution role
+	OverrideAWSLogsExecutionRole bool
 }

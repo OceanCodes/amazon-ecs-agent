@@ -30,6 +30,11 @@ type engineError interface {
 	ErrorName() string
 }
 
+type cannotStopContainerError interface {
+	engineError
+	IsRetriableError() bool
+}
+
 // impossibleTransitionError is an error that occurs when an event causes a
 // container to try and transition to a state that it cannot be moved to
 type impossibleTransitionError struct {
@@ -154,15 +159,21 @@ func (err CannotStopContainerError) ErrorName() string {
 	return "CannotStopContainerError"
 }
 
-func (err CannotStopContainerError) IsUnretriableError() bool {
+// IsRetriableError returns a boolean indicating whether the call that
+// generated the error can be retried.
+// When stopping a container, most errors that we can get should be
+// considered retriable. However, in the case where the container is
+// already stopped or doesn't exist at all, there's no sense in
+// retrying.
+func (err CannotStopContainerError) IsRetriableError() bool {
 	if _, ok := err.fromError.(*docker.NoSuchContainer); ok {
-		return true
+		return false
 	}
 	if _, ok := err.fromError.(*docker.ContainerNotRunning); ok {
-		return true
+		return false
 	}
 
-	return false
+	return true
 }
 
 // CannotPullContainerError indicates any error when trying to pull
@@ -191,6 +202,28 @@ func (err CannotPullECRContainerError) Error() string {
 
 func (err CannotPullECRContainerError) ErrorName() string {
 	return "CannotPullECRContainerError"
+}
+
+// Retry fulfills the utils.Retrier interface and allows retries to be skipped by utils.Retry* functions
+func (err CannotPullECRContainerError) Retry() bool {
+	return false
+}
+
+type CreateEmptyVolumeError struct {
+	fromError error
+}
+
+func (err CreateEmptyVolumeError) Error() string {
+	return err.fromError.Error()
+}
+
+func (err CreateEmptyVolumeError) ErrorName() string {
+	return "CreateEmptyVolumeError"
+}
+
+// Retry fulfills the utils.Retrier interface and allows retries to be skipped by utils.Retry* functions
+func (err CreateEmptyVolumeError) Retry() bool {
+	return false
 }
 
 // CannotCreateContainerError indicates any error when trying to create a container
@@ -269,4 +302,31 @@ func (err CannotListContainersError) Error() string {
 
 func (err CannotListContainersError) ErrorName() string {
 	return "CannotListContainersError"
+}
+
+// ContainerNetworkingError indicates any error when dealing with the network
+// namespace of container
+type ContainerNetworkingError struct {
+	fromError error
+}
+
+func (err ContainerNetworkingError) Error() string {
+	return err.fromError.Error()
+}
+
+func (err ContainerNetworkingError) ErrorName() string {
+	return "ContainerNetworkingError"
+}
+
+// CannotGetDockerClientVersionError indicates error when trying to get docker
+// client api version
+type CannotGetDockerClientVersionError struct {
+	fromError error
+}
+
+func (err CannotGetDockerClientVersionError) ErrorName() string {
+	return "CannotGetDockerClientVersionError"
+}
+func (err CannotGetDockerClientVersionError) Error() string {
+	return err.fromError.Error()
 }

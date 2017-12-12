@@ -13,21 +13,9 @@
 
 Invoke-Expression "${PSScriptRoot}\..\misc\windows-iam\Setup_Iam.ps1"
 Invoke-Expression "${PSScriptRoot}\..\misc\windows-listen80\Setup_Listen80.ps1"
+Invoke-Expression "${PSScriptRoot}\..\misc\windows-cpupercent\build.ps1"
+Invoke-Expression "${PSScriptRoot}\..\misc\windows-python\build.ps1"
 
-#First stop/remove any existing credential proxy containers
-$credentialProxy = "ecs-cred-proxy"
-docker inspect ${credentialProxy}
-if (${LastExitCode} -eq 0) {
-    try {
-        docker stop ${credentialProxy}
-        docker rm ${credentialProxy}
-    } catch {
-        exit 1
-    }
-}
-
-# Set up the proxy
-Invoke-Expression "${PSScriptRoot}\..\misc\windows-deploy\setupcredentialproxy.ps1"
 
 # Run the tests
 $cwd = (pwd).Path
@@ -41,7 +29,6 @@ try {
   echo "Simple functional tests exited with ${simpletestExitCode}"
 } finally {
   cd "$cwd"
-  docker stop ecs-cred-proxy
 }
 if (${handwrittenExitCode} -ne 0) {
   exit $handwrittenExitCode

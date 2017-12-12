@@ -26,6 +26,12 @@ import (
 	docker "github.com/fsouza/go-dockerclient"
 )
 
+var dockerClient ecsengine.DockerClient
+
+func init() {
+	dockerClient, _ = ecsengine.NewDockerGoClient(clientFactory, &cfg)
+}
+
 func (resolver *IntegContainerMetadataResolver) addToMap(containerID string) {
 	resolver.containerIDToTask[containerID] = &api.Task{
 		Arn:     taskArn,
@@ -40,8 +46,6 @@ func (resolver *IntegContainerMetadataResolver) addToMap(containerID string) {
 
 func TestStatsEngineWithExistingContainers(t *testing.T) {
 	// Create a new docker stats engine
-	// TODO make dockerStatsEngine not a singleton object
-	dockerStatsEngine = nil
 	engine := NewDockerStatsEngine(&cfg, dockerClient, eventStream("TestStatsEngineWithExistingContainers"))
 
 	// Create a container to get the container id.
@@ -143,8 +147,6 @@ func TestStatsEngineWithExistingContainers(t *testing.T) {
 
 func TestStatsEngineWithNewContainers(t *testing.T) {
 	// Create a new docker stats engine
-	// TODO make dockerStatsEngine not a singleton object
-	dockerStatsEngine = nil
 	engine := NewDockerStatsEngine(&cfg, dockerClient, eventStream("TestStatsEngineWithNewContainers"))
 	defer engine.removeAll()
 
@@ -246,7 +248,7 @@ func TestStatsEngineWithNewContainers(t *testing.T) {
 
 func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 	containerChangeEventStream := eventStream("TestStatsEngineWithDockerTaskEngine")
-	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState())
+	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState(), nil)
 	container, err := createGremlin(client)
 	if err != nil {
 		t.Fatalf("Error creating container: %v", err)
@@ -288,8 +290,6 @@ func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 		&testTask)
 
 	// Create a new docker stats engine
-	// TODO make dockerStatsEngine not a singleton object
-	dockerStatsEngine = nil
 	statsEngine := NewDockerStatsEngine(&cfg, dockerClient, containerChangeEventStream)
 	err = statsEngine.MustInit(taskEngine, defaultCluster, defaultContainerInstance)
 	if err != nil {
@@ -375,8 +375,8 @@ func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 }
 
 func TestStatsEngineWithDockerTaskEngineMissingRemoveEvent(t *testing.T) {
-	containerChangeEventStream := eventStream("TestStatsEngineWithDockerTaskEngine")
-	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState())
+	containerChangeEventStream := eventStream("TestStatsEngineWithDockerTaskEngineMissingRemoveEvent")
+	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState(), nil)
 
 	container, err := createGremlin(client)
 	if err != nil {
@@ -412,8 +412,6 @@ func TestStatsEngineWithDockerTaskEngineMissingRemoveEvent(t *testing.T) {
 		&testTask)
 
 	// Create a new docker stats engine
-	// TODO make dockerStatsEngine not a singleton object
-	dockerStatsEngine = nil
 	statsEngine := NewDockerStatsEngine(&cfg, dockerClient, containerChangeEventStream)
 	err = statsEngine.MustInit(taskEngine, defaultCluster, defaultContainerInstance)
 	if err != nil {

@@ -17,18 +17,21 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+
+	"github.com/aws/amazon-ecs-agent/agent/credentials"
 )
 
 const (
-	// DockerContainerMinimumMemoryInBytes is the minimum amount of
-	// memory to be allocated to a docker container
-	DockerContainerMinimumMemoryInBytes = 4 * 1024 * 1024 // 4MB
-)
+	// defaultContainerSteadyStateStatus defines the container status at
+	// which the container is assumed to be in steady state. It is set
+	// to 'ContainerRunning' unless overridden
+	defaultContainerSteadyStateStatus = ContainerRunning
 
-// ContainerOverrides are overrides applied to the container
-type ContainerOverrides struct {
-	Command *[]string `json:"command"`
-}
+	// awslogsAuthExecutionRole is the string value passed in the task payload
+	// that specifies that the log driver should be authenticated using the
+	// execution role
+	awslogsAuthExecutionRole = "ExecutionRole"
+)
 
 // DockerConfig represents additional metadata about a container to run. It's
 // remodeled from the `ecsacs` api model file. Eventually it should not exist
@@ -62,6 +65,13 @@ type Container struct {
 	DockerConfig           DockerConfig                `json:"dockerConfig"`
 	RegistryAuthentication *RegistryAuthenticationData `json:"registryAuthentication"`
 
+	// LogsAuthStrategy specifies how the logs driver for the container will be
+	// authenticated
+	LogsAuthStrategy string
+
+	// lock is used for fields that are accessed and updated concurrently
+	lock sync.RWMutex
+
 	// DesiredStatusUnsafe represents the state where the container should go. Generally,
 	// the desired status is informed by the ECS backend as a result of either
 	// API calls made to ECS or decisions made by the ECS service scheduler,
@@ -74,7 +84,6 @@ type Container struct {
 	// setter/getter.  When this is done, we need to ensure that the UnmarshalJSON
 	// is handled properly so that the state storage continues to work.
 	DesiredStatusUnsafe ContainerStatus `json:"desiredStatus"`
-	desiredStatusLock   sync.RWMutex
 
 	// KnownStatusUnsafe represents the state where the container is.
 	// NOTE: Do not access `KnownStatusUnsafe` directly.  Instead, use `GetKnownStatus`
@@ -83,14 +92,29 @@ type Container struct {
 	// setter/getter.  When this is done, we need to ensure that the UnmarshalJSON
 	// is handled properly so that the state storage continues to work.
 	KnownStatusUnsafe ContainerStatus `json:"KnownStatus"`
-	knownStatusLock   sync.RWMutex
 
-	// RunDependencies is a list of containers that must be run before
+	// TransitionDependencySet is a set of dependencies that must be satisfied
+	// in order for this container to transition.  Each transition dependency
+	// specifies a resource upon which the transition is dependent, a status
+	// that depends on the resource, and the state of the dependency that
+	// satisfies.
+	TransitionDependencySet TransitionDependencySet `json:"TransitionDependencySet"`
+
+	// SteadyStateDependencies is a list of containers that must be in "steady state" before
 	// this one is created
-	RunDependencies []string
-	// 'Internal' containers are ones that are not directly specified by
-	// task definitions, but created by the agent
-	IsInternal bool
+	// Note: Current logic requires that the containers specified here are run
+	// before this container can even be pulled.
+	//
+	// Deprecated: Use TransitionDependencySet instead. SteadyStateDependencies is retained for compatibility with old
+	// state files.
+	SteadyStateDependencies []string `json:"RunDependencies"`
+
+	// Type specifies the container type. Except the 'Normal' type, all other types
+	// are not directly specified by task definitions, but created by the agent. The
+	// JSON tag is retained as this field's previous name 'IsInternal' for maintaining
+	// backwards compatibility. Please see JSON parsing hooks for this type for more
+	// details
+	Type ContainerType `json:"IsInternal"`
 
 	// AppliedStatus is the status that has been "applied" (e.g., we've called Pull,
 	// Create, Start, or Stop) but we don't yet know that the application was successful.
@@ -106,10 +130,20 @@ type Container struct {
 	// setter/getter.  When this is done, we need to ensure that the UnmarshalJSON is
 	// handled properly so that the state storage continues to work.
 	SentStatusUnsafe ContainerStatus `json:"SentStatus"`
-	sentStatusLock   sync.RWMutex
 
-	KnownExitCode     *int
+	// MetadataFileUpdated is set to true when we have completed updating the
+	// metadata file
+	MetadataFileUpdated bool `json:"metadataFileUpdated"`
+
+	knownExitCode     *int
 	KnownPortBindings []PortBinding
+
+	// SteadyStateStatusUnsafe specifies the steady state status for the container
+	// If uninitialized, it's assumed to be set to 'ContainerRunning'. Even though
+	// it's not only supposed to be set when the container is being created, it's
+	// exposed outside of the package so that it's marshalled/unmarshalled in the
+	// the JSON body while saving the state
+	SteadyStateStatusUnsafe *ContainerStatus `json:"SteadyStateStatus,omitempty"`
 }
 
 // DockerContainer is a mapping between containers-as-docker-knows-them and
@@ -131,17 +165,14 @@ func (dc *DockerContainer) String() string {
 	return fmt.Sprintf("Id: %s, Name: %s, Container: %s", dc.DockerID, dc.DockerName, dc.Container.String())
 }
 
-// Overriden applies the overridden command and returns the resulting
-// container object
-func (c *Container) Overridden() *Container {
-	result := *c
-
-	// We only support Command overrides at the moment
-	if result.Overrides.Command != nil {
-		result.Command = *c.Overrides.Command
+// NewContainerWithSteadyState creates a new Container object with the specified
+// steady state. Containers that need the non default steady state set will
+// use this method instead of setting it directly
+func NewContainerWithSteadyState(steadyState ContainerStatus) *Container {
+	steadyStateStatus := steadyState
+	return &Container{
+		SteadyStateStatusUnsafe: &steadyStateStatus,
 	}
-
-	return &result
 }
 
 // KnownTerminal returns true if the container's known status is STOPPED
@@ -156,57 +187,183 @@ func (c *Container) DesiredTerminal() bool {
 
 // GetKnownStatus returns the known status of the container
 func (c *Container) GetKnownStatus() ContainerStatus {
-	c.knownStatusLock.RLock()
-	defer c.knownStatusLock.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
 	return c.KnownStatusUnsafe
 }
 
 // SetKnownStatus sets the known status of the container
 func (c *Container) SetKnownStatus(status ContainerStatus) {
-	c.knownStatusLock.Lock()
-	defer c.knownStatusLock.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	c.KnownStatusUnsafe = status
 }
 
 // GetDesiredStatus gets the desired status of the container
 func (c *Container) GetDesiredStatus() ContainerStatus {
-	c.desiredStatusLock.RLock()
-	defer c.desiredStatusLock.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
 	return c.DesiredStatusUnsafe
 }
 
 // SetDesiredStatus sets the desired status of the container
 func (c *Container) SetDesiredStatus(status ContainerStatus) {
-	c.desiredStatusLock.Lock()
-	defer c.desiredStatusLock.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	c.DesiredStatusUnsafe = status
 }
 
 // GetSentStatus safely returns the SentStatusUnsafe of the container
 func (c *Container) GetSentStatus() ContainerStatus {
-	c.sentStatusLock.RLock()
-	defer c.sentStatusLock.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
 	return c.SentStatusUnsafe
 }
 
 // SetSentStatus safely sets the SentStatusUnsafe of the container
 func (c *Container) SetSentStatus(status ContainerStatus) {
-	c.sentStatusLock.Lock()
-	defer c.sentStatusLock.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	c.SentStatusUnsafe = status
 }
 
+// SetKnownExitCode sets exit code field in container struct
+func (c *Container) SetKnownExitCode(i *int) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.knownExitCode = i
+}
+
+// GetKnownExitCode returns the container exit code
+func (c *Container) GetKnownExitCode() *int {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.knownExitCode
+}
+
+// SetRegistryAuthCredentials sets the credentials for pulling image from ECR
+func (c *Container) SetRegistryAuthCredentials(credential credentials.IAMRoleCredentials) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	c.RegistryAuthentication.ECRAuthData.SetPullCredentials(credential)
+}
+
+// ShouldPullWithExecutionRole returns whether this container has its own ECR credentials
+func (c *Container) ShouldPullWithExecutionRole() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.RegistryAuthentication != nil &&
+		c.RegistryAuthentication.Type == "ecr" &&
+		c.RegistryAuthentication.ECRAuthData != nil &&
+		c.RegistryAuthentication.ECRAuthData.UseExecutionRole
+}
+
 // String returns a human readable string representation of this object
 func (c *Container) String() string {
-	ret := fmt.Sprintf("%s(%s) (%s->%s)", c.Name, c.Image, c.GetKnownStatus().String(), c.GetDesiredStatus().String())
-	if c.KnownExitCode != nil {
-		ret += " - Exit: " + strconv.Itoa(*c.KnownExitCode)
+	ret := fmt.Sprintf("%s(%s) (%s->%s)", c.Name, c.Image,
+		c.GetKnownStatus().String(), c.GetDesiredStatus().String())
+	if c.GetKnownExitCode() != nil {
+		ret += " - Exit: " + strconv.Itoa(*c.GetKnownExitCode())
 	}
 	return ret
+}
+
+// GetSteadyStateStatus returns the steady state status for the container. If
+// Container.steadyState is not initialized, the default steady state status
+// defined by `defaultContainerSteadyStateStatus` is returned. The 'pause'
+// container's steady state differs from that of other containers, as the
+// 'pause' container can reach its teady state once networking resources
+// have been provisioned for it, which is done in the `ContainerResourcesProvisioned`
+// state
+func (c *Container) GetSteadyStateStatus() ContainerStatus {
+	if c.SteadyStateStatusUnsafe == nil {
+		return defaultContainerSteadyStateStatus
+	}
+	return *c.SteadyStateStatusUnsafe
+}
+
+// IsKnownSteadyState returns true if the `KnownState` of the container equals
+// the `steadyState` defined for the container
+func (c *Container) IsKnownSteadyState() bool {
+	knownStatus := c.GetKnownStatus()
+	return knownStatus == c.GetSteadyStateStatus()
+}
+
+// GetNextKnownStateProgression returns the state that the container should
+// progress to based on its `KnownState`. The progression is
+// incremental until the container reaches its steady state. From then on,
+// it transitions to `ContainerStopped`.
+//
+// For example:
+// a. if the steady state of the container is defined as `ContainerRunning`,
+// the progression is:
+// Container: None -> Pulled -> Created -> Running* -> Stopped -> Zombie
+//
+// b. if the steady state of the container is defined as `ContainerResourcesProvisioned`,
+// the progression is:
+// Container: None -> Pulled -> Created -> Running -> Provisioned* -> Stopped -> Zombie
+//
+// c. if the steady state of the container is defined as `ContainerCreated`,
+// the progression is:
+// Container: None -> Pulled -> Created* -> Stopped -> Zombie
+func (c *Container) GetNextKnownStateProgression() ContainerStatus {
+	if c.IsKnownSteadyState() {
+		return ContainerStopped
+	}
+
+	return c.GetKnownStatus() + 1
+}
+
+// IsInternal returns true if the container type is either `ContainerEmptyHostVolume`
+// or `ContainerCNIPause`. It returns false otherwise
+func (c *Container) IsInternal() bool {
+	if c.Type == ContainerNormal {
+		return false
+	}
+
+	return true
+}
+
+// IsRunning returns true if the container's known status is either RUNNING
+// or RESOURCES_PROVISIONED. It returns false otherwise
+func (c *Container) IsRunning() bool {
+	return c.GetKnownStatus().IsRunning()
+}
+
+// IsMetadataFileUpdated returns true if the metadata file has been once the
+// metadata file is ready and will no longer change
+func (c *Container) IsMetadataFileUpdated() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.MetadataFileUpdated
+}
+
+// SetMetadataFileUpdated sets the container's MetadataFileUpdated status to true
+func (c *Container) SetMetadataFileUpdated() {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	c.MetadataFileUpdated = true
+}
+
+// IsEssential returns whether the container is an essential container or not
+func (c *Container) IsEssential() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.Essential
+}
+
+// LogAuthExecutionRole returns true if the auth is by exectution role
+func (c *Container) AWSLogAuthExecutionRole() bool {
+	return c.LogsAuthStrategy == awslogsAuthExecutionRole
 }

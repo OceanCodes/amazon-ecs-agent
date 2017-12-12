@@ -37,8 +37,19 @@ func main() {
 	os.Exit(_main())
 }
 
-var typesOnlyTplAPI = template.Must(template.New("api").Parse(`
-{{ range $_, $s := .ShapeList }}
+func ShapeListWithErrors(a *api.API) []*api.Shape {
+	list := make([]*api.Shape, 0, len(a.Shapes))
+	for _, n := range a.ShapeNames() {
+		list = append(list, a.Shapes[n])
+	}
+	return list
+}
+
+var typesOnlyTplAPI = template.Must(template.New("api").Funcs(template.FuncMap{
+	"ShapeListWithErrors": ShapeListWithErrors,
+}).Parse(`
+{{ $shapeList := ShapeListWithErrors $ }}
+{{ range $_, $s := $shapeList }}
 {{ if eq $s.Type "structure"}}{{ $s.GoCode }}{{ end }}
 
 {{ end }}
@@ -83,8 +94,9 @@ func _main() int {
 
 func genTypesOnlyAPI(file string) error {
 	apiGen := &api.API{
-		NoRemoveUnusedShapes:   true,
-		NoRenameToplevelShapes: true,
+		NoRemoveUnusedShapes:      true,
+		NoRenameToplevelShapes:    true,
+		NoGenStructFieldAccessors: true,
 	}
 	apiGen.Attach(file)
 	apiGen.Setup()
@@ -154,5 +166,17 @@ func genFull(file string) error {
 	if err != nil {
 		return err
 	}
+
+	processedErrorCode, err := imports.Process("", []byte(fmt.Sprintf("package %s\n\n%s", api.PackageName(), api.APIErrorsGoCode())), nil)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	outFile = filepath.Join(api.PackageName(), "errors.go")
+	err = ioutil.WriteFile(outFile, []byte(fmt.Sprintf("%s\n%s", copyrightHeader, processedErrorCode)), 0644)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }

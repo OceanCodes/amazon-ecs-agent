@@ -37,6 +37,7 @@ const (
 	secretKey         = "secret"
 	sessionToken      = "token"
 	credentialsId     = "credsid"
+	roleType          = "TaskExecution"
 )
 
 var expectedAck = &ecsacs.IAMRoleCredentialsAckRequest{
@@ -45,7 +46,7 @@ var expectedAck = &ecsacs.IAMRoleCredentialsAckRequest{
 	CredentialsId: aws.String(credentialsId),
 }
 
-var expectedCredentials = &credentials.TaskIAMRoleCredentials{
+var expectedCredentials = credentials.TaskIAMRoleCredentials{
 	ARN: taskArn,
 	IAMRoleCredentials: credentials.IAMRoleCredentials{
 		RoleArn:         roleArn,
@@ -54,12 +55,14 @@ var expectedCredentials = &credentials.TaskIAMRoleCredentials{
 		SessionToken:    sessionToken,
 		Expiration:      expiration,
 		CredentialsID:   credentialsId,
+		RoleType:        roleType,
 	},
 }
 
 var message = &ecsacs.IAMRoleCredentialsMessage{
 	MessageId: aws.String(messageId),
 	TaskArn:   aws.String(taskArn),
+	RoleType:  aws.String(roleType),
 	RoleCredentials: &ecsacs.IAMRoleCredentials{
 		RoleArn:         aws.String(roleArn),
 		Expiration:      aws.String(expiration),

@@ -1,6 +1,6 @@
 // +build !windows,functional
 
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -281,8 +281,8 @@ func TestSquidProxy(t *testing.T) {
 	}
 }
 
-// TestAwslogsDriver verifies that container logs are sent to Amazon CloudWatch Logs with awslogs as the log driver
-func TestAwslogsDriver(t *testing.T) {
+// TestAWSLogsDriver verifies that container logs are sent to Amazon CloudWatch Logs with awslogs as the log driver
+func TestAWSLogsDriver(t *testing.T) {
 	RequireDockerVersion(t, ">=1.9.0") // awslogs drivers available from docker 1.9.0
 	cwlClient := cloudwatchlogs.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
 	// Test whether the log group existed or not
@@ -337,9 +337,9 @@ func TestAwslogsDriver(t *testing.T) {
 		LogGroupName:  aws.String(awslogsLogGroupName),
 		LogStreamName: aws.String(fmt.Sprintf("ecs-functional-tests/awslogs/%s", taskId)),
 	}
-	resp, err := cwlClient.GetLogEvents(params)
-	require.NoError(t, err, "CloudWatchLogs get log failed")
 
+	resp, err := waitCloudwatchLogs(cwlClient, params)
+	require.NoError(t, err, "CloudWatchLogs get log failed")
 	assert.Len(t, resp.Events, 1, fmt.Sprintf("Get unexpected number of log events: %d", len(resp.Events)))
 	assert.Equal(t, *resp.Events[0].Message, "hello world", fmt.Sprintf("Got log events message unexpected: %s", *resp.Events[0].Message))
 }
@@ -383,11 +383,11 @@ func TestTelemetry(t *testing.T) {
 	time.Sleep(waitMetricsInCloudwatchDuration)
 
 	cwclient := cloudwatch.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
-	err = VerifyMetrics(cwclient, params, true)
+	_, err = VerifyMetrics(cwclient, params, true)
 	assert.NoError(t, err, "Before task running, verify metrics for CPU utilization failed")
 
 	params.MetricName = aws.String("MemoryUtilization")
-	err = VerifyMetrics(cwclient, params, true)
+	_, err = VerifyMetrics(cwclient, params, true)
 	assert.NoError(t, err, "Before task running, verify metrics for memory utilization failed")
 
 	testTask, err := agent.StartTask(t, "telemetry")
@@ -400,11 +400,11 @@ func TestTelemetry(t *testing.T) {
 	params.EndTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
 	params.StartTime = aws.Time((*params.EndTime).Add(-waitMetricsInCloudwatchDuration).UTC())
 	params.MetricName = aws.String("CPUUtilization")
-	err = VerifyMetrics(cwclient, params, false)
+	_, err = VerifyMetrics(cwclient, params, false)
 	assert.NoError(t, err, "Task is running, verify metrics for CPU utilization failed")
 
 	params.MetricName = aws.String("MemoryUtilization")
-	err = VerifyMetrics(cwclient, params, false)
+	_, err = VerifyMetrics(cwclient, params, false)
 	assert.NoError(t, err, "Task is running, verify metrics for memory utilization failed")
 
 	err = testTask.Stop()
@@ -417,11 +417,11 @@ func TestTelemetry(t *testing.T) {
 	params.EndTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
 	params.StartTime = aws.Time((*params.EndTime).Add(-waitMetricsInCloudwatchDuration).UTC())
 	params.MetricName = aws.String("CPUUtilization")
-	err = VerifyMetrics(cwclient, params, true)
+	_, err = VerifyMetrics(cwclient, params, true)
 	assert.NoError(t, err, "Task stopped: verify metrics for CPU utilization failed")
 
 	params.MetricName = aws.String("MemoryUtilization")
-	err = VerifyMetrics(cwclient, params, true)
+	_, err = VerifyMetrics(cwclient, params, true)
 	assert.NoError(t, err, "Task stopped, verify metrics for memory utilization failed")
 }
 
@@ -635,4 +635,28 @@ func fluentdDriverTest(taskDefinition string, t *testing.T) {
 
 	err = SearchStrInDir(fluentdLogPath, "ecsfts", logTag)
 	assert.NoError(t, err, "failed to find the log tag specified in the task definition")
+}
+
+// TestMetadataServiceValidator Tests that the metadata file can be accessed from the
+// container using the ECS_CONTAINER_METADATA_FILE environment variables
+func TestMetadataServiceValidator(t *testing.T) {
+	agentOptions := &AgentOptions{
+		ExtraEnvironment: map[string]string{
+			"ECS_ENABLE_CONTAINER_METADATA": "true",
+		},
+	}
+
+	agent := RunAgent(t, agentOptions)
+	defer agent.Cleanup()
+
+	task, err := agent.StartTask(t, "mdservice-validator-unix")
+	require.NoError(t, err, "Register task definition failed")
+	defer task.Stop()
+
+	// clean up
+	err = task.WaitStopped(2 * time.Minute)
+	require.NoError(t, err, "Error waiting for task to transition to STOPPED")
+	exitCode, _ := task.ContainerExitcode("mdservice-validator-unix")
+
+	assert.Equal(t, 42, exitCode, fmt.Sprintf("Expected exit code of 42; got %d", exitCode))
 }

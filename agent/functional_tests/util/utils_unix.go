@@ -1,6 +1,6 @@
 // +build !windows,functional
 
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -55,7 +55,7 @@ func init() {
 		ecsconfig.Region = &region
 	}
 	if ecsconfig.Region == nil {
-		if iid, err := ec2.GetInstanceIdentityDocument(); err == nil {
+		if iid, err := ec2.NewEC2MetadataClient(nil).InstanceIdentityDocument(); err == nil {
 			ecsconfig.Region = &iid.Region
 		}
 	}
@@ -139,6 +139,7 @@ func (agent *TestAgent) StartAgent() error {
 		Env: []string{
 			"ECS_CLUSTER=" + Cluster,
 			"ECS_DATADIR=/data",
+			"ECS_HOST_DATA_DIR=" + agent.TestDir,
 			"ECS_LOGLEVEL=debug",
 			"ECS_LOGFILE=/log/integ_agent.log",
 			"ECS_BACKEND_HOST=" + os.Getenv("ECS_BACKEND_HOST"),
@@ -165,8 +166,12 @@ func (agent *TestAgent) StartAgent() error {
 		Links: agent.Options.ContainerLinks,
 	}
 
+	if os.Getenv("ECS_FTEST_FORCE_NET_HOST") != "" {
+		hostConfig.NetworkMode = "host"
+	}
+
 	if agent.Options != nil {
-		// Override the default docker envrionment variable
+		// Override the default docker environment variable
 		for key, value := range agent.Options.ExtraEnvironment {
 			envVarExists := false
 			for i, str := range dockerConfig.Env {
@@ -206,13 +211,17 @@ func (agent *TestAgent) StartAgent() error {
 	if err != nil {
 		return errors.New("Could not inspect agent container: " + err.Error())
 	}
-	agent.IntrospectionURL = "http://localhost:" + containerMetadata.NetworkSettings.Ports["51678/tcp"][0].HostPort
-	err = agent.platformIndependentStartAgent()
-	return err
+	if containerMetadata.HostConfig.NetworkMode == "host" {
+		agent.IntrospectionURL = "http://localhost:51678"
+	} else {
+		agent.IntrospectionURL = "http://localhost:" + containerMetadata.NetworkSettings.Ports["51678/tcp"][0].HostPort
+	}
+
+	return agent.verifyIntrospectionAPI()
 }
 
 // getBindMounts actually constructs volume binds for container's host config
-// It also additionally checks for envrionment variables:
+// It also additionally checks for environment variables:
 // * CGROUP_PATH: the cgroup path
 // * EXECDRIVER_PATH: the path of metrics
 func (agent *TestAgent) getBindMounts() []string {

@@ -1,6 +1,6 @@
 // +build windows, functional
 
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -44,7 +44,7 @@ func init() {
 		ecsconfig.Region = &region
 	}
 	if ecsconfig.Region == nil {
-		if iid, err := ec2.GetInstanceIdentityDocument(); err == nil {
+		if iid, err := ec2.NewEC2MetadataClient(nil).InstanceIdentityDocument(); err == nil {
 			ecsconfig.Region = &iid.Region
 		}
 	}
@@ -63,7 +63,6 @@ func init() {
 }
 
 // RunAgent launches the agent and returns an object which may be used to reference it.
-
 func RunAgent(t *testing.T, options *AgentOptions) *TestAgent {
 	agent := &TestAgent{t: t}
 
@@ -89,7 +88,7 @@ func RunAgent(t *testing.T, options *AgentOptions) *TestAgent {
 	os.Setenv("ECS_CLUSTER", Cluster)
 	os.Setenv("ECS_ENABLE_TASK_IAM_ROLE", "true")
 	os.Setenv("DOCKER_HOST", "npipe:////./pipe/docker_engine")
-	os.Setenv("ECS_DISABLE_METRICS", "true")
+	os.Setenv("ECS_DISABLE_METRICS", "false")
 	os.Setenv("ECS_AUDIT_LOGFILE", logdir+"/audit.log")
 	os.Setenv("ECS_LOGLEVEL", "debug")
 	os.Setenv("ECS_AVAILABLE_LOGGING_DRIVERS", `["json-file","awslogs"]`)
@@ -116,6 +115,11 @@ func (agent *TestAgent) StopAgent() error {
 }
 
 func (agent *TestAgent) StartAgent() error {
+	if agent.Options != nil {
+		for k, v := range agent.Options.ExtraEnvironment {
+			os.Setenv(k, v)
+		}
+	}
 	agentInvoke := exec.Command(".\\agent.exe")
 	if TestDirectory := os.Getenv("ECS_WINDOWS_TEST_DIR"); TestDirectory != "" {
 		agentInvoke.Dir = TestDirectory
@@ -127,11 +131,15 @@ func (agent *TestAgent) StartAgent() error {
 	}
 	agent.Process = agentInvoke.Process
 	agent.IntrospectionURL = "http://localhost:51678"
-	err = agent.platformIndependentStartAgent()
-	return err
+	return agent.verifyIntrospectionAPI()
 }
 
 func (agent *TestAgent) Cleanup() {
+	if agent.Options != nil {
+		for k, _ := range agent.Options.ExtraEnvironment {
+			os.Unsetenv(k)
+		}
+	}
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Amazon\ECS Agent\State File`, registry.ALL_ACCESS)
 	if err != nil {
 		return

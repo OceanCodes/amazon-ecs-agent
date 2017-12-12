@@ -16,35 +16,47 @@ package engine
 import (
 	"archive/tar"
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/net/context"
-
 	"github.com/aws/amazon-ecs-agent/agent/api"
+	"github.com/aws/amazon-ecs-agent/agent/async"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/ecr"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerauth"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockeriface"
 	"github.com/aws/amazon-ecs-agent/agent/engine/emptyvolume"
+	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
-	"github.com/cihub/seelog"
 
+	"github.com/cihub/seelog"
 	docker "github.com/fsouza/go-dockerclient"
 )
 
 const (
 	dockerDefaultTag = "latest"
+	// imageNameFormat is the name of a image may look like: repo:tag
+	imageNameFormat = "%s:%s"
+	// the buffer size will ensure agent doesn't miss any event from docker
+	dockerEventBufferSize = 100
 )
 
 // Timelimits for docker operations enforced above docker
 const (
 	// ListContainersTimeout is the timeout for the ListContainers API.
-	ListContainersTimeout   = 10 * time.Minute
+	ListContainersTimeout = 10 * time.Minute
+	// LoadImageTimeout is the timeout for the LoadImage API. It's set
+	// to much lower value than pullImageTimeout as it involves loading
+	// image from either a file or STDIN
+	// calls involved.
+	// TODO: Benchmark and re-evaluate this value
+	LoadImageTimeout        = 10 * time.Minute
 	pullImageTimeout        = 2 * time.Hour
 	createContainerTimeout  = 4 * time.Minute
 	startContainerTimeout   = 3 * time.Minute
@@ -52,6 +64,11 @@ const (
 	removeContainerTimeout  = 5 * time.Minute
 	inspectContainerTimeout = 30 * time.Second
 	removeImageTimeout      = 3 * time.Minute
+
+	// Parameters for caching the docker auth for ECR
+	tokenCacheSize = 100
+	// tokenCacheTTL is the default ttl of the docker auth for ECR
+	tokenCacheTTL = 12 * time.Hour
 
 	// dockerPullBeginTimeout is the timeout from when a 'pull' is called to when
 	// we expect to see output on the pull progress stream. This is to work
@@ -65,32 +82,80 @@ const (
 	// StatsInactivityTimeout controls the amount of time we hold open a
 	// connection to the Docker daemon waiting for stats data
 	StatsInactivityTimeout = 5 * time.Second
+
+	// retry settings for pulling images
+	maximumPullRetries        = 10
+	minimumPullRetryDelay     = 250 * time.Millisecond
+	maximumPullRetryDelay     = 1 * time.Second
+	pullRetryDelayMultiplier  = 1.5
+	pullRetryJitterMultiplier = 0.2
 )
 
 // DockerClient interface to make testing it easier
 type DockerClient interface {
 	// SupportedVersions returns a slice of the supported docker versions (or at least supposedly supported).
 	SupportedVersions() []dockerclient.DockerVersion
+
+	// KnownVersions returns a slice of the Docker API versions known to the Docker daemon.
+	KnownVersions() []dockerclient.DockerVersion
+
 	// WithVersion returns a new DockerClient for which all operations will use the given remote api version.
 	// A default version will be used for a client not produced via this method.
 	WithVersion(dockerclient.DockerVersion) DockerClient
+
+	// ContainerEvents returns a channel of DockerContainerChangeEvents. Events are placed into the channel and should
+	// be processed by the listener.
 	ContainerEvents(ctx context.Context) (<-chan DockerContainerChangeEvent, error)
 
+	// PullImage pulls an image. authData should contain authentication data provided by the ECS backend.
 	PullImage(image string, authData *api.RegistryAuthenticationData) DockerContainerMetadata
 
+	// ImportLocalEmptyVolumeImage imports a locally-generated empty-volume image for supported platforms.
+	ImportLocalEmptyVolumeImage() DockerContainerMetadata
+
+	// CreateContainer creates a container with the provided docker.Config, docker.HostConfig, and name. A timeout value
+	// should be provided for the request.
 	CreateContainer(*docker.Config, *docker.HostConfig, string, time.Duration) DockerContainerMetadata
+
+	// StartContainer starts the container identified by the name provided. A timeout value should be provided for the
+	// request.
 	StartContainer(string, time.Duration) DockerContainerMetadata
+
+	// StopContainer stops the container identified by the name provided. A timeout value should be provided for the
+	// request.
 	StopContainer(string, time.Duration) DockerContainerMetadata
+
+	// DescribeContainer returns status information about the specified container.
 	DescribeContainer(string) (api.ContainerStatus, DockerContainerMetadata)
+
+	// RemoveContainer removes a container (typically the rootfs, logs, and associated metadata) identified by the name.
+	// A timeout value should be provided for the request.
 	RemoveContainer(string, time.Duration) error
 
+	// InspectContainer returns information about the specified container. A timeout value should be provided for the
+	// request.
 	InspectContainer(string, time.Duration) (*docker.Container, error)
+
+	// ListContainers returns the set of containers known to the Docker daemon. A timeout value should be provided for
+	// the request.
 	ListContainers(bool, time.Duration) ListContainersResponse
+
+	// Stats returns a channel of stat data for the specified container. A context should be provided so the request can
+	// be canceled.
 	Stats(string, context.Context) (<-chan *docker.Stats, error)
 
+	// Version returns the version of the Docker daemon.
 	Version() (string, error)
+	// APIVersion returns the api version of the client
+	APIVersion() (dockerclient.DockerVersion, error)
+
+	// InspectImage returns information about the specified image.
 	InspectImage(string) (*docker.Image, error)
+
+	// RemoveImage removes the metadata associated with an image and may remove the underlying layer data. A timeout
+	// value should be provided for the request.
 	RemoveImage(string, time.Duration) error
+	LoadImage(io.Reader, time.Duration) error
 }
 
 // DockerGoClient wraps the underlying go-dockerclient library.
@@ -111,8 +176,9 @@ type DockerClient interface {
 type dockerGoClient struct {
 	clientFactory    dockerclient.Factory
 	version          dockerclient.DockerVersion
-	auth             dockerauth.DockerAuthProvider
 	ecrClientFactory ecr.ECRFactory
+	auth             dockerauth.DockerAuthProvider
+	ecrTokenCache    async.Cache
 	config           *config.Config
 
 	_time     ttime.Time
@@ -134,6 +200,7 @@ var scratchCreateLock sync.Mutex
 // NewDockerGoClient creates a new DockerGoClient
 func NewDockerGoClient(clientFactory dockerclient.Factory, cfg *config.Config) (DockerClient, error) {
 	client, err := clientFactory.GetDefaultClient()
+
 	if err != nil {
 		log.Error("Unable to connect to docker daemon. Ensure docker is running.", "err", err)
 		return nil, err
@@ -155,6 +222,7 @@ func NewDockerGoClient(clientFactory dockerclient.Factory, cfg *config.Config) (
 		clientFactory:    clientFactory,
 		auth:             dockerauth.NewDockerAuthProvider(cfg.EngineAuthType, dockerAuthData),
 		ecrClientFactory: ecr.NewECRFactory(cfg.AcceptInsecureCert),
+		ecrTokenCache:    async.NewLRUCache(tokenCacheSize, tokenCacheTTL),
 		config:           cfg,
 	}, nil
 }
@@ -176,38 +244,53 @@ func (dg *dockerGoClient) time() ttime.Time {
 }
 
 func (dg *dockerGoClient) PullImage(image string, authData *api.RegistryAuthenticationData) DockerContainerMetadata {
+	// TODO Switch to just using context.WithDeadline and get rid of this funky code
 	timeout := dg.time().After(pullImageTimeout)
+	ctx, cancel := context.WithCancel(context.TODO())
 
 	response := make(chan DockerContainerMetadata, 1)
-	go func() { response <- dg.pullImage(image, authData) }()
+	go func() {
+		imagePullBackoff := utils.NewSimpleBackoff(minimumPullRetryDelay, maximumPullRetryDelay, pullRetryJitterMultiplier, pullRetryDelayMultiplier)
+		err := utils.RetryNWithBackoffCtx(ctx, imagePullBackoff, maximumPullRetries, func() error {
+			err := dg.pullImage(image, authData)
+			if err != nil {
+				seelog.Warnf("Failed to pull image %s: %s", image, err.Error())
+			}
+			return err
+		})
+		response <- DockerContainerMetadata{Error: wrapPullErrorAsEngineError(err)}
+	}()
 	select {
 	case resp := <-response:
 		return resp
 	case <-timeout:
+		cancel()
 		return DockerContainerMetadata{Error: &DockerTimeoutError{pullImageTimeout, "pulled"}}
 	}
 }
 
-func (dg *dockerGoClient) pullImage(image string, authData *api.RegistryAuthenticationData) DockerContainerMetadata {
+func wrapPullErrorAsEngineError(err error) engineError {
+	var retErr engineError
+	if err != nil {
+		engErr, ok := err.(engineError)
+		if !ok {
+			engErr = CannotPullContainerError{err}
+		}
+		retErr = engErr
+	}
+	return retErr
+}
+
+func (dg *dockerGoClient) pullImage(image string, authData *api.RegistryAuthenticationData) engineError {
 	log.Debug("Pulling image", "image", image)
 	client, err := dg.dockerClient()
 	if err != nil {
-		return DockerContainerMetadata{Error: CannotGetDockerClientError{version: dg.version, err: err}}
-	}
-
-	// Special case; this image is not one that should be pulled, but rather
-	// should be created locally if necessary
-	if image == emptyvolume.Image+":"+emptyvolume.Tag {
-		scratchErr := dg.createScratchImageIfNotExists()
-		if scratchErr != nil {
-			return DockerContainerMetadata{Error: &api.DefaultNamedError{Name: "CreateEmptyVolumeError", Err: "Could not create empty volume " + scratchErr.Error()}}
-		}
-		return DockerContainerMetadata{}
+		return CannotGetDockerClientError{version: dg.version, err: err}
 	}
 
 	authConfig, err := dg.getAuthdata(image, authData)
 	if err != nil {
-		return DockerContainerMetadata{Error: CannotPullContainerError{err}}
+		return wrapPullErrorAsEngineError(err)
 	}
 
 	pullDebugOut, pullWriter := io.Pipe()
@@ -272,20 +355,41 @@ func (dg *dockerGoClient) pullImage(image string, authData *api.RegistryAuthenti
 		break
 	case pullErr := <-pullFinished:
 		if pullErr != nil {
-			return DockerContainerMetadata{Error: CannotPullContainerError{pullErr}}
+			return CannotPullContainerError{pullErr}
 		}
-		return DockerContainerMetadata{}
+		return nil
 	case <-timeout:
-		return DockerContainerMetadata{Error: &DockerTimeoutError{dockerPullBeginTimeout, "pullBegin"}}
+		return &DockerTimeoutError{dockerPullBeginTimeout, "pullBegin"}
 	}
 	log.Debug("Pull began for image", "image", image)
 	defer log.Debug("Pull completed for image", "image", image)
 
 	err = <-pullFinished
 	if err != nil {
-		return DockerContainerMetadata{Error: CannotPullContainerError{err}}
+		return CannotPullContainerError{err}
 	}
-	return DockerContainerMetadata{}
+	return nil
+}
+
+// ImportLocalEmptyVolumeImage imports a locally-generated empty-volume image for supported platforms.
+func (dg *dockerGoClient) ImportLocalEmptyVolumeImage() DockerContainerMetadata {
+	timeout := dg.time().After(pullImageTimeout)
+
+	response := make(chan DockerContainerMetadata, 1)
+	go func() {
+		err := dg.createScratchImageIfNotExists()
+		var wrapped engineError
+		if err != nil {
+			wrapped = CreateEmptyVolumeError{err}
+		}
+		response <- DockerContainerMetadata{Error: wrapped}
+	}()
+	select {
+	case resp := <-response:
+		return resp
+	case <-timeout:
+		return DockerContainerMetadata{Error: &DockerTimeoutError{pullImageTimeout, "pulled"}}
+	}
 }
 
 func (dg *dockerGoClient) createScratchImageIfNotExists() error {
@@ -299,6 +403,7 @@ func (dg *dockerGoClient) createScratchImageIfNotExists() error {
 
 	_, err = client.InspectImage(emptyvolume.Image + ":" + emptyvolume.Tag)
 	if err == nil {
+		seelog.Debug("Empty volume image is already present, skipping import")
 		// Already exists; assume that it's okay to use it
 		return nil
 	}
@@ -311,6 +416,7 @@ func (dg *dockerGoClient) createScratchImageIfNotExists() error {
 		writer.Close()
 	}()
 
+	seelog.Debug("Importing empty volume image")
 	// Create it from an empty tarball
 	err = client.ImportImage(docker.ImportImageOptions{
 		Repository:  emptyvolume.Image,
@@ -331,10 +437,10 @@ func (dg *dockerGoClient) InspectImage(image string) (*docker.Image, error) {
 
 func (dg *dockerGoClient) getAuthdata(image string, authData *api.RegistryAuthenticationData) (docker.AuthConfiguration, error) {
 	if authData == nil || authData.Type != "ecr" {
-		return dg.auth.GetAuthconfig(image)
+		return dg.auth.GetAuthconfig(image, nil)
 	}
-	provider := dockerauth.NewECRAuthProvider(authData.ECRAuthData, dg.ecrClientFactory)
-	authConfig, err := provider.GetAuthconfig(image)
+	provider := dockerauth.NewECRAuthProvider(dg.ecrClientFactory, dg.ecrTokenCache)
+	authConfig, err := provider.GetAuthconfig(image, authData.ECRAuthData)
 	if err != nil {
 		return authConfig, CannotPullECRContainerError{err}
 	}
@@ -433,10 +539,21 @@ func (dg *dockerGoClient) startContainer(ctx context.Context, id string) DockerC
 	return metadata
 }
 
+// dockerStateToState converts the container status from docker to status recognized by the agent
+// Ref: https://github.com/fsouza/go-dockerclient/blob/fd53184a1439b6d7b82ca54c1cd9adac9a5278f2/container.go#L133
 func dockerStateToState(state docker.State) api.ContainerStatus {
 	if state.Running {
 		return api.ContainerRunning
 	}
+
+	if state.Dead {
+		return api.ContainerStopped
+	}
+
+	if state.StartedAt.IsZero() && state.Error == "" {
+		return api.ContainerCreated
+	}
+
 	return api.ContainerStopped
 }
 
@@ -517,7 +634,7 @@ func (dg *dockerGoClient) StopContainer(dockerID string, timeout time.Duration) 
 		if err == context.DeadlineExceeded {
 			return DockerContainerMetadata{Error: &DockerTimeoutError{timeout, "stopped"}}
 		}
-		return DockerContainerMetadata{Error: &CannotStopContainerError{err}}
+		return DockerContainerMetadata{Error: CannotStopContainerError{err}}
 	}
 }
 
@@ -630,27 +747,29 @@ func (dg *dockerGoClient) ContainerEvents(ctx context.Context) (<-chan DockerCon
 	if err != nil {
 		return nil, err
 	}
+	dockerEvents := make(chan *docker.APIEvents, dockerEventBufferSize)
 	events := make(chan *docker.APIEvents)
+	buffer := NewInfiniteBuffer()
 
-	err = client.AddEventListener(events)
+	err = client.AddEventListener(dockerEvents)
 	if err != nil {
 		log.Error("Unable to add a docker event listener", "err", err)
 		return nil, err
 	}
 	go func() {
 		<-ctx.Done()
-		client.RemoveEventListener(events)
+		client.RemoveEventListener(dockerEvents)
 	}()
+
+	// Cache the event from go docker client
+	go buffer.StartListening(dockerEvents)
+	// Read the buffered events and send to task engine
+	go buffer.Consume(events)
 
 	changedContainers := make(chan DockerContainerChangeEvent)
 
 	go func() {
 		for event := range events {
-			// currently only container events type needs to be handled
-			if event.Type != "container" || event.ID == "" {
-				continue
-			}
-
 			containerID := event.ID
 			log.Debug("Got event from docker daemon", "event", event)
 
@@ -664,58 +783,20 @@ func (dg *dockerGoClient) ContainerEvents(ctx context.Context) (<-chan DockerCon
 				fallthrough
 			case "die":
 				status = api.ContainerStopped
-			case "kill":
-				fallthrough
-			case "rename":
-				// TODO, ensure this wasn't one of our containers. This isn't critical
-				// because we typically have the docker id stored too and a wrong name
-				// won't be fatal once we do
-				continue
-			case "restart":
-			case "resize":
-			case "destroy":
-			case "unpause":
-			// These result in us falling through to inspect the container, some
-			// out of caution, some because it's a form of state change
-
 			case "oom":
-				seelog.Infof("process within container %v died due to OOM", event.ID)
+				containerInfo := event.ID
+				// events only contain the container's name in newer Docker API
+				// versions (starting with 1.22)
+				if containerName, ok := event.Actor.Attributes["name"]; ok {
+					containerInfo += fmt.Sprintf(" (name: %q)", containerName)
+				}
+
+				seelog.Infof("process within container %s died due to OOM", containerInfo)
 				// "oom" can either means any process got OOM'd, but doesn't always
 				// mean the container dies (non-init processes). If the container also
 				// dies, you see a "die" status as well; we'll update suitably there
-				fallthrough
-			case "pause":
-				// non image events that aren't of interest currently
-				fallthrough
-			case "exec_create":
-				fallthrough
-			case "exec_start":
-				fallthrough
-			case "top":
-				fallthrough
-			case "attach":
-				fallthrough
-			// image events
-			case "export":
-				fallthrough
-			case "pull":
-				fallthrough
-			case "push":
-				fallthrough
-			case "tag":
-				fallthrough
-			case "untag":
-				fallthrough
-			case "import":
-				fallthrough
-			case "delete":
-				// No interest in image events
 				continue
 			default:
-				if strings.HasPrefix(event.Status, "exec_create:") || strings.HasPrefix(event.Status, "exec_start:") {
-					continue
-				}
-
 				// Because docker emits new events even when you use an old event api
 				// version, it's not that big a deal
 				seelog.Debugf("Unknown status event from docker: %s", event.Status)
@@ -786,7 +867,11 @@ func (dg *dockerGoClient) listContainers(all bool, ctx context.Context) ListCont
 }
 
 func (dg *dockerGoClient) SupportedVersions() []dockerclient.DockerVersion {
-	return dg.clientFactory.FindAvailableVersions()
+	return dg.clientFactory.FindSupportedAPIVersions()
+}
+
+func (dg *dockerGoClient) KnownVersions() []dockerclient.DockerVersion {
+	return dg.clientFactory.FindKnownAPIVersions()
 }
 
 func (dg *dockerGoClient) Version() (string, error) {
@@ -799,6 +884,15 @@ func (dg *dockerGoClient) Version() (string, error) {
 		return "", err
 	}
 	return info.Get("Version"), nil
+}
+
+// APIVersion returns the client api version
+func (dg *dockerGoClient) APIVersion() (dockerclient.DockerVersion, error) {
+	client, err := dg.dockerClient()
+	if err != nil {
+		return "", err
+	}
+	return dg.clientFactory.FindClientAPIVersion(client), nil
 }
 
 // Stats returns a channel of *docker.Stats entries for the container.
@@ -827,6 +921,8 @@ func (dg *dockerGoClient) Stats(id string, ctx context.Context) (<-chan *docker.
 	return stats, nil
 }
 
+// RemoveImage invokes github.com/fsouza/go-dockerclient.Client's
+// RemoveImage API with a timeout
 func (dg *dockerGoClient) RemoveImage(imageName string, imageRemovalTimeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), imageRemovalTimeout)
 	defer cancel()
@@ -847,4 +943,32 @@ func (dg *dockerGoClient) removeImage(imageName string) error {
 		return err
 	}
 	return client.RemoveImage(imageName)
+}
+
+// LoadImage invokes loads an image from an input stream, with a specified timeout
+func (dg *dockerGoClient) LoadImage(inputStream io.Reader, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	response := make(chan error, 1)
+	go func() {
+		response <- dg.loadImage(docker.LoadImageOptions{
+			InputStream: inputStream,
+			Context:     ctx,
+		})
+	}()
+	select {
+	case resp := <-response:
+		return resp
+	case <-ctx.Done():
+		return &DockerTimeoutError{timeout, "loading image"}
+	}
+}
+
+func (dg *dockerGoClient) loadImage(opts docker.LoadImageOptions) error {
+	client, err := dg.dockerClient()
+	if err != nil {
+		return err
+	}
+	return client.LoadImage(opts)
 }

@@ -4,6 +4,7 @@ out/
 coverage/
 _bin/
 *.exe
+*.exe~
 *.zip
 *.swp
 *.orig
@@ -13,3 +14,6 @@ _bin/
 *.sublime-*
 .DS_Store
 /misc/windows-iam/devcon*
+/misc/pause-container/pause
+*-stamp
+/.idea/
