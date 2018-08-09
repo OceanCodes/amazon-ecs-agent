@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OceanCodes/amazon-ecs-agent/agent/taskresource/firelens"
 	apiappmesh "github.com/aws/amazon-ecs-agent/agent/api/appmesh"
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
@@ -29,13 +30,10 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/asmsecret"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup/control/mock_control"
-	"github.com/aws/amazon-ecs-agent/agent/taskresource/firelens"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/ssmsecret"
-	mock_ioutilwrapper "github.com/aws/amazon-ecs-agent/agent/utils/ioutilwrapper/mocks"
-	"github.com/golang/mock/gomock"
-
 	"github.com/aws/aws-sdk-go/aws"
 	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/golang/mock/gomock"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -471,15 +469,29 @@ func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 		minDockerClientAPIVersion, &config.Config{})
 	assert.Nil(t, configErr)
 
-	expected := dockercontainer.HostConfig{
-		Privileged:  true,
-		SecurityOpt: []string{"foo", "bar"},
-		VolumesFrom: []string{"dockername-c2"},
-		Resources: dockercontainer.Resources{
-			// Convert MB to B and set Memory
-			Memory:     int64(100 * 1024 * 1024),
-			CPUShares:  50,
-			CPUPercent: minimumCPUPercent,
+	expected := docker.HostConfig{
+		Privileged:       true,
+		SecurityOpt:      []string{"foo", "bar"},
+		VolumesFrom:      []string{"dockername-c2"},
+		MemorySwappiness: memorySwappinessDefault,
+		CPUPercent:       minimumCPUPercent,
+		UsernsMode:       "host",
+	}
+
+	assertSetStructFieldsEqual(t, expected, *hostConfig)
+}
+
+// TestSetConfigHostconfigBasedOnAPIVersion tests the docker hostconfig was correctly
+// set based on the docker client version
+func TestSetConfigHostconfigBasedOnAPIVersion(t *testing.T) {
+	memoryMiB := 500
+	testTask := &Task{
+		Containers: []*apicontainer.Container{
+			{
+				Name:   "c1",
+				CPU:    uint(10),
+				Memory: uint(memoryMiB),
+			},
 		},
 	}
 	assertSetStructFieldsEqual(t, expected, *hostConfig)

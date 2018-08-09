@@ -197,11 +197,30 @@ func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 		minDockerClientAPIVersion, &config.Config{})
 	assert.Nil(t, configErr)
 
-	expected := dockercontainer.HostConfig{
-		Resources: dockercontainer.Resources{
-			// Convert MB to B and set Memory
-			Memory:     apicontainer.DockerContainerMinimumMemoryInBytes,
-			CPUPercent: minimumCPUPercent,
+	expected := docker.HostConfig{
+		Memory:           apicontainer.DockerContainerMinimumMemoryInBytes,
+		Privileged:       true,
+		SecurityOpt:      []string{"foo", "bar"},
+		VolumesFrom:      []string{"dockername-c2"},
+		MemorySwappiness: memorySwappinessDefault,
+		CPUPercent:       minimumCPUPercent,
+		UsernsMode:       "host",
+	}
+
+	assertSetStructFieldsEqual(t, expected, *hostConfig)
+}
+
+// TestSetConfigHostconfigBasedOnAPIVersion tests the docker hostconfig was correctly
+// set based on the docker client version
+func TestSetConfigHostconfigBasedOnAPIVersion(t *testing.T) {
+	memoryMiB := 500
+	testTask := &Task{
+		Containers: []*apicontainer.Container{
+			{
+				Name:   "c1",
+				CPU:    uint(10),
+				Memory: uint(memoryMiB),
+			},
 		},
 		Privileged:  true,
 		SecurityOpt: []string{"foo", "bar"},
