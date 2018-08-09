@@ -27,7 +27,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup/control/mock_control"
-	"github.com/aws/amazon-ecs-agent/agent/utils/ioutilwrapper/mocks"
 	"github.com/golang/mock/gomock"
 
 	docker "github.com/fsouza/go-dockerclient"
@@ -342,6 +341,7 @@ func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 		VolumesFrom:      []string{"dockername-c2"},
 		MemorySwappiness: memorySwappinessDefault,
 		CPUPercent:       minimumCPUPercent,
+		UsernsMode:       "host",
 	}
 
 	assertSetStructFieldsEqual(t, expected, *hostConfig)

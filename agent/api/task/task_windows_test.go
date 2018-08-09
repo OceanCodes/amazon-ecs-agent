@@ -215,6 +215,7 @@ func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 		VolumesFrom:      []string{"dockername-c2"},
 		MemorySwappiness: memorySwappinessDefault,
 		CPUPercent:       minimumCPUPercent,
+		UsernsMode:       "host",
 	}
 
 	assertSetStructFieldsEqual(t, expected, *hostConfig)
