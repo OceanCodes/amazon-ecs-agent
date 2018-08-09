@@ -1,0 +1,15 @@
+version: 2
+
+jobs:
+  build:
+    docker:
+      - image: codeocean/build-golang:1.10
+
+    working_directory: /go/src/github.com/aws/amazon-ecs-agent
+
+    steps:
+      - checkout
+
+      #- run: make get-deps
+      #- run: make test
+      #- run: make static-check

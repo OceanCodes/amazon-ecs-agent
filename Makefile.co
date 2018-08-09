@@ -1,0 +1,23 @@
+include ./Makefile
+
+SHELL := /bin/bash
+IMAGE_NAME = codeocean/amazon-ecs-agent
+REGISTRY ?= 524950183868.dkr.ecr.us-east-1.amazonaws.com
+TAG ?= $(shell ./make-tag.sh)
+BRANCH ?= $(CIRCLE_BRANCH)
+
+.PHONY: image
+image: release
+	docker tag amazon/amazon-ecs-agent:latest $(REGISTRY)/$(IMAGE_NAME):latest
+	if [ -n "$(TAG)" ]; then docker tag amazon/amazon-ecs-agent:latest $(REGISTRY)/$(IMAGE_NAME):$(TAG); fi
+
+.PHONY: ecr-login
+ecr-login:
+	`aws ecr get-login --region us-east-1 --no-include-email`
+
+.PHONY: push
+push: ecr-login
+	if [ -n "$(TAG)" ]; then \
+		docker push $(REGISTRY)/$(IMAGE_NAME):latest; \
+		docker push $(REGISTRY)/$(IMAGE_NAME):$(TAG); \
+	fi
