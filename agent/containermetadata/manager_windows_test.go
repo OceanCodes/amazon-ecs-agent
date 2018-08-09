@@ -1,5 +1,6 @@
-// +build !integration, windows
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// +build unit,windows
+
+// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,7 +16,10 @@
 package containermetadata
 
 import (
+	"context"
 	"testing"
+
+	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/mock/gomock"
@@ -28,6 +32,7 @@ func TestCreate(t *testing.T) {
 	defer done()
 
 	mockTaskARN := validTaskARN
+	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
 	mockConfig := &docker.Config{Env: make([]string, 0)}
 	mockHostConfig := &docker.HostConfig{Binds: make([]string, 0)}
@@ -43,7 +48,7 @@ func TestCreate(t *testing.T) {
 	newManager := &metadataManager{
 		osWrap: mockOS,
 	}
-	err := newManager.Create(mockConfig, mockHostConfig, mockTaskARN, mockContainerName)
+	err := newManager.Create(mockConfig, mockHostConfig, mockTask, mockContainerName)
 
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(mockConfig.Env), "Unexpected number of environment variables in config")
@@ -57,6 +62,7 @@ func TestUpdate(t *testing.T) {
 
 	mockDockerID := dockerID
 	mockTaskARN := validTaskARN
+	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
 	mockState := docker.State{
 		Running: true,
@@ -79,13 +85,15 @@ func TestUpdate(t *testing.T) {
 	}
 
 	gomock.InOrder(
-		mockClient.EXPECT().InspectContainer(mockDockerID, inspectContainerTimeout).Return(mockContainer, nil),
+		mockClient.EXPECT().InspectContainer(gomock.Any(), mockDockerID, inspectContainerTimeout).Return(mockContainer, nil),
 		mockOS.EXPECT().OpenFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(mockFile, nil),
 		mockFile.EXPECT().Write(gomock.Any()).Return(0, nil),
 		mockFile.EXPECT().Sync().Return(nil),
 		mockFile.EXPECT().Close().Return(nil),
 	)
-	err := newManager.Update(mockDockerID, mockTaskARN, mockContainerName)
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	err := newManager.Update(ctx, mockDockerID, mockTask, mockContainerName)
 
 	assert.NoError(t, err)
 }

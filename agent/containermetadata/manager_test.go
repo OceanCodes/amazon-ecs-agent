@@ -1,5 +1,6 @@
-// +build !integration
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// +build unit
+
+// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,9 +16,11 @@
 package containermetadata
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	"github.com/aws/amazon-ecs-agent/agent/containermetadata/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ioutilwrapper/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/utils/oswrapper/mocks"
@@ -28,12 +31,14 @@ import (
 )
 
 const (
-	containerInstanceARN = "a6348116-0ba6-43b5-87c9-8a7e10294b75"
-	dockerID             = "888888888887"
-	invalidTaskARN       = "invalidARN"
-	validTaskARN         = "arn:aws:ecs:region:account-id:task/task-id"
-	containerName        = "container"
-	dataDir              = "ecs_mockdata"
+	containerInstanceARN   = "a6348116-0ba6-43b5-87c9-8a7e10294b75"
+	dockerID               = "888888888887"
+	invalidTaskARN         = "invalidARN"
+	validTaskARN           = "arn:aws:ecs:region:account-id:task/task-id"
+	taskDefinitionFamily   = "taskdefinitionfamily"
+	taskDefinitionRevision = "8"
+	containerName          = "container"
+	dataDir                = "ecs_mockdata"
 )
 
 func managerSetup(t *testing.T) (*mock_containermetadata.MockDockerMetadataClient, *mock_ioutilwrapper.MockIOUtil, *mock_oswrapper.MockOS, *mock_oswrapper.MockFile, func()) {
@@ -63,10 +68,11 @@ func TestCreateMalformedFilepath(t *testing.T) {
 	defer done()
 
 	mockTaskARN := invalidTaskARN
+	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
 
 	newManager := &metadataManager{}
-	err := newManager.Create(nil, nil, mockTaskARN, mockContainerName)
+	err := newManager.Create(nil, nil, mockTask, mockContainerName)
 	assert.Error(t, err)
 }
 
@@ -76,6 +82,7 @@ func TestCreateMkdirAllFail(t *testing.T) {
 	defer done()
 
 	mockTaskARN := validTaskARN
+	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
 
 	gomock.InOrder(
@@ -85,7 +92,7 @@ func TestCreateMkdirAllFail(t *testing.T) {
 	newManager := &metadataManager{
 		osWrap: mockOS,
 	}
-	err := newManager.Create(nil, nil, mockTaskARN, mockContainerName)
+	err := newManager.Create(nil, nil, mockTask, mockContainerName)
 	assert.Error(t, err)
 }
 
@@ -96,14 +103,17 @@ func TestUpdateInspectFail(t *testing.T) {
 
 	mockDockerID := dockerID
 	mockTaskARN := validTaskARN
+	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
 
 	newManager := &metadataManager{
 		client: mockClient,
 	}
 
-	mockClient.EXPECT().InspectContainer(mockDockerID, inspectContainerTimeout).Return(nil, errors.New("Inspect fail"))
-	err := newManager.Update(mockDockerID, mockTaskARN, mockContainerName)
+	mockClient.EXPECT().InspectContainer(gomock.Any(), mockDockerID, inspectContainerTimeout).Return(nil, errors.New("Inspect fail"))
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	err := newManager.Update(ctx, mockDockerID, mockTask, mockContainerName)
 
 	assert.Error(t, err, "Expected inspect error to result in update fail")
 }
@@ -115,6 +125,7 @@ func TestUpdateNotRunningFail(t *testing.T) {
 
 	mockDockerID := dockerID
 	mockTaskARN := validTaskARN
+	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
 	mockState := docker.State{
 		Running: false,
@@ -127,8 +138,10 @@ func TestUpdateNotRunningFail(t *testing.T) {
 		client: mockClient,
 	}
 
-	mockClient.EXPECT().InspectContainer(mockDockerID, inspectContainerTimeout).Return(mockContainer, nil)
-	err := newManager.Update(mockDockerID, mockTaskARN, mockContainerName)
+	mockClient.EXPECT().InspectContainer(gomock.Any(), mockDockerID, inspectContainerTimeout).Return(mockContainer, nil)
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	err := newManager.Update(ctx, mockDockerID, mockTask, mockContainerName)
 	assert.Error(t, err)
 }
 

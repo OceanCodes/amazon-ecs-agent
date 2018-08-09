@@ -19,7 +19,8 @@
         "requestUri":"/"
       },
       "input":{"shape":"AttachTaskNetworkInterfacesMessage"},
-      "output":{"shape":"AckRequest"}
+      "output":{"shape":"AckRequest"},
+      "documentation":"AttachNetworkInterface requests that the Agent look for and confirm the attachment of a network interface by the control plane."
     },
     "Error":{
       "name":"Error",
@@ -35,7 +36,8 @@
         "method":"POST",
         "requestUri":"/"
       },
-      "input":{"shape":"HeartbeatMessage"}
+      "input":{"shape":"HeartbeatMessage"},
+      "documentation":"Heartbeat is a periodic message that informs the agent all is well."
     },
     "Payload":{
       "name":"Payload",
@@ -44,7 +46,8 @@
         "requestUri":"/"
       },
       "input":{"shape":"PayloadMessage"},
-      "output":{"shape":"AckRequest"}
+      "output":{"shape":"AckRequest"},
+      "documentation":"Payload requests the Agent parse and launch a given Payload. In response, the Agent will 'ack' the request it recieved after procesing it."
     },
     "PerformUpdate":{
       "name":"PerformUpdate",
@@ -70,7 +73,8 @@
         {"shape":"AccessDeniedException"},
         {"shape":"InvalidInstanceException"},
         {"shape":"InactiveInstanceException"}
-      ]
+      ],
+      "documentation":"Poll is the (increasingly poorly named) method by which the agent creates an initial long-lasting connection over which more specific operations are performed. More accurately, this would be named \"StartSession\""
     },
     "RefreshTaskIAMRoleCredentials":{
       "name":"RefreshTaskIAMRoleCredentials",
@@ -100,6 +104,13 @@
     }
   },
   "shapes":{
+    "ASMAuthData":{
+      "type":"structure",
+      "members":{
+        "credentialsParameter":{"shape":"String"},
+        "region":{"shape":"String"}
+      }
+    },
     "AccessDeniedException":{
       "type":"structure",
       "members":{
@@ -133,7 +144,10 @@
     },
     "AuthenticationType":{
       "type":"string",
-      "enum":["ecr"]
+      "enum":[
+        "ecr",
+        "asm"
+      ]
     },
     "BadRequestException":{
       "type":"structure",
@@ -166,6 +180,7 @@
         "mountPoints":{"shape":"MountPointList"},
         "volumesFrom":{"shape":"VolumeFromList"},
         "dockerConfig":{"shape":"DockerConfig"},
+        "healthCheckType":{"shape":"HealthCheckType"},
         "registryAuthentication":{"shape":"RegistryAuthenticationData"},
         "logsAuthStrategy":{"shape":"AuthStrategy"}
       }
@@ -180,6 +195,16 @@
         "version":{"shape":"String"},
         "config":{"shape":"String"},
         "hostConfig":{"shape":"String"}
+      }
+    },
+    "DockerVolumeConfiguration":{
+      "type":"structure",
+      "members":{
+        "scope":{"shape":"Scope"},
+        "autoprovision":{"shape":"Boolean"},
+        "driver":{"shape":"String"},
+        "driverOpts":{"shape":"StringMap"},
+        "labels":{"shape":"StringMap"}
       }
     },
     "Double":{"type":"double"},
@@ -201,7 +226,9 @@
         "ipv4Addresses":{"shape":"IPv4AddressList"},
         "ipv6Addresses":{"shape":"IPv6AddressList"},
         "domainName":{"shape":"StringList"},
-        "domainNameServers":{"shape":"StringList"}
+        "domainNameServers":{"shape":"StringList"},
+        "privateDnsName":{"shape":"String"},
+        "subnetGatewayIpv4Address":{"shape":"String"}
       }
     },
     "ElasticNetworkInterfaceList":{
@@ -218,6 +245,10 @@
       "members":{
         "message":{"shape":"String"}
       }
+    },
+    "HealthCheckType":{
+      "type":"string",
+      "enum":["docker"]
     },
     "HeartbeatMessage":{
       "type":"structure",
@@ -370,7 +401,8 @@
       "type":"structure",
       "members":{
         "type":{"shape":"AuthenticationType"},
-        "ecrAuthData":{"shape":"ECRAuthData"}
+        "ecrAuthData":{"shape":"ECRAuthData"},
+        "asmAuthData":{"shape":"ASMAuthData"}
       }
     },
     "RoleType":{
@@ -378,6 +410,13 @@
       "enum":[
         "TaskApplication",
         "TaskExecution"
+      ]
+    },
+    "Scope":{
+      "type":"string",
+      "enum":[
+        "task",
+        "shared"
       ]
     },
     "SensitiveString":{
@@ -404,6 +443,11 @@
     "StringList":{
       "type":"list",
       "member":{"shape":"String"}
+    },
+    "StringMap":{
+      "type":"map",
+      "key":{"shape":"String"},
+      "value":{"shape":"String"}
     },
     "Task":{
       "type":"structure",
@@ -453,7 +497,9 @@
       "type":"structure",
       "members":{
         "name":{"shape":"String"},
-        "host":{"shape":"HostVolumeProperties"}
+        "type":{"shape":"VolumeType"},
+        "host":{"shape":"HostVolumeProperties"},
+        "dockerVolumeConfiguration":{"shape":"DockerVolumeConfiguration"}
       }
     },
     "VolumeFrom":{
@@ -470,6 +516,13 @@
     "VolumeList":{
       "type":"list",
       "member":{"shape":"Volume"}
+    },
+    "VolumeType":{
+      "type":"string",
+      "enum":[
+        "host",
+        "docker"
+      ]
     }
   }
 }

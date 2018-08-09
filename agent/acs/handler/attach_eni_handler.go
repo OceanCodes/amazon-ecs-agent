@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
-	"github.com/aws/amazon-ecs-agent/agent/api"
+	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
@@ -26,7 +26,7 @@ import (
 	"github.com/cihub/seelog"
 	"github.com/pkg/errors"
 
-	"golang.org/x/net/context"
+	"context"
 )
 
 // attachENIHandler represents the ENI attach operation for the ACS client
@@ -135,7 +135,7 @@ func (handler *attachENIHandler) addENIAttachmentToState(message *ecsacs.AttachT
 	attachmentARN := aws.StringValue(message.ElasticNetworkInterfaces[0].AttachmentArn)
 	mac := aws.StringValue(message.ElasticNetworkInterfaces[0].MacAddress)
 	taskARN := aws.StringValue(message.TaskArn)
-	eniAttachment := &api.ENIAttachment{
+	eniAttachment := &apieni.ENIAttachment{
 		TaskARN:          taskARN,
 		AttachmentARN:    attachmentARN,
 		AttachStatusSent: false,

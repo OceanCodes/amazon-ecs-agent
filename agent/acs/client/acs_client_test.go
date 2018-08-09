@@ -1,4 +1,6 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// +build unit
+
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -25,7 +27,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
-	"github.com/aws/amazon-ecs-agent/agent/wsclient/mock"
+	"github.com/aws/amazon-ecs-agent/agent/wsclient/wsconn/mock"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/golang/mock/gomock"
@@ -82,6 +84,8 @@ const (
 	rwTimeout       = time.Second
 )
 
+var testCreds = credentials.NewStaticCredentials("test-id", "test-secret", "test-token")
+
 var testCfg = &config.Config{
 	AcceptInsecureCert: true,
 	AWSRegion:          "us-east-1",
@@ -91,7 +95,7 @@ func TestMakeUnrecognizedRequest(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	conn := mock_wsclient.NewMockWebsocketConn(ctrl)
+	conn := mock_wsconn.NewMockWebsocketConn(ctrl)
 	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	conn.EXPECT().Close()
 
@@ -108,7 +112,7 @@ func TestWriteAckRequest(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	conn := mock_wsclient.NewMockWebsocketConn(ctrl)
+	conn := mock_wsconn.NewMockWebsocketConn(ctrl)
 	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).Times(2)
 	conn.EXPECT().Close()
 	cs := testCS(conn)
@@ -135,7 +139,7 @@ func TestPayloadHandlerCalled(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	conn := mock_wsclient.NewMockWebsocketConn(ctrl)
+	conn := mock_wsconn.NewMockWebsocketConn(ctrl)
 	// Messages should be read from the connection at least once
 	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).MinTimes(1)
 	conn.EXPECT().ReadMessage().Return(websocket.TextMessage,
@@ -167,7 +171,7 @@ func TestRefreshCredentialsHandlerCalled(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	conn := mock_wsclient.NewMockWebsocketConn(ctrl)
+	conn := mock_wsconn.NewMockWebsocketConn(ctrl)
 	// Messages should be read from the connection at least once
 	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).MinTimes(1)
 	conn.EXPECT().ReadMessage().Return(websocket.TextMessage,
@@ -206,7 +210,7 @@ func TestClosingConnection(t *testing.T) {
 	defer ctrl.Finish()
 
 	// Returning EOF tells the ClientServer that the connection is closed
-	conn := mock_wsclient.NewMockWebsocketConn(ctrl)
+	conn := mock_wsconn.NewMockWebsocketConn(ctrl)
 	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil)
 	conn.EXPECT().ReadMessage().Return(0, nil, io.EOF)
 	// SetWriteDeadline will be invoked once for WriteMessage() and
@@ -235,7 +239,7 @@ func TestConnect(t *testing.T) {
 		t.Fatal(<-serverErr)
 	}()
 
-	cs := New(server.URL, testCfg, credentials.AnonymousCredentials, rwTimeout)
+	cs := New(server.URL, testCfg, testCreds, rwTimeout)
 	// Wait for up to a second for the mock server to launch
 	for i := 0; i < 100; i++ {
 		err = cs.Connect()
@@ -306,15 +310,14 @@ func TestConnectClientError(t *testing.T) {
 	}))
 	defer testServer.Close()
 
-	cs := New(testServer.URL, testCfg, credentials.AnonymousCredentials, rwTimeout)
+	cs := New(testServer.URL, testCfg, testCreds, rwTimeout)
 	err := cs.Connect()
 	_, ok := err.(*wsclient.WSError)
 	assert.True(t, ok)
 	assert.EqualError(t, err, "InvalidClusterException: Invalid cluster")
 }
 
-func testCS(conn *mock_wsclient.MockWebsocketConn) wsclient.ClientServer {
-	testCreds := credentials.AnonymousCredentials
+func testCS(conn *mock_wsconn.MockWebsocketConn) wsclient.ClientServer {
 	foo := New("localhost:443", testCfg, testCreds, rwTimeout)
 	cs := foo.(*clientServer)
 	cs.SetConnection(conn)
@@ -361,7 +364,7 @@ func TestAttachENIHandlerCalled(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	conn := mock_wsclient.NewMockWebsocketConn(ctrl)
+	conn := mock_wsconn.NewMockWebsocketConn(ctrl)
 	cs := testCS(conn)
 	defer cs.Close()
 

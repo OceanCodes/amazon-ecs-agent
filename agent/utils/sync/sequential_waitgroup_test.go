@@ -1,4 +1,6 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// +build unit
+
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -39,11 +41,12 @@ func TestSequentialWaitgroup(t *testing.T) {
 func TestManyDones(t *testing.T) {
 	wg := NewSequentialWaitGroup()
 
-	for i := 1; i < 1000; i++ {
+	waitGroupCount := 10
+	for i := 1; i < waitGroupCount; i++ {
 		wg.Add(int64(i), i)
 	}
 
-	for i := 1; i < 1000; i++ {
+	for i := 1; i < waitGroupCount; i++ {
 		wg.Wait(int64(i - 1))
 
 		isAwake := make(chan bool)

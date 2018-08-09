@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/aws/amazon-ecs-agent/agent/api"
+	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/version"
 )
 
@@ -40,7 +40,7 @@ type ecsRoundTripper struct {
 }
 
 func userAgent() string {
-	return fmt.Sprintf("%s (%s) (+http://aws.amazon.com/ecs/)", version.String(), api.OSType)
+	return fmt.Sprintf("%s (%s) (+http://aws.amazon.com/ecs/)", version.String(), config.OSType)
 }
 
 func (client *ecsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -84,7 +84,7 @@ type OverridableTransport interface {
 }
 
 // SetTransport allows you to set the transport. It is exposed so tests may
-// override it. It fulfills an interface to allow calling thsi function via
+// override it. It fulfills an interface to allow calling this function via
 // assertion to the exported interface
 func (client *ecsRoundTripper) SetTransport(transport http.RoundTripper) {
 	client.transport = transport

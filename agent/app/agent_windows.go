@@ -17,13 +17,18 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/agent/asm/factory"
+	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers/exitcodes"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/cihub/seelog"
 	"golang.org/x/sys/windows/svc"
 )
@@ -32,6 +37,10 @@ const (
 	//EcsSvcName is the name of the service
 	EcsSvcName = "AmazonECS"
 )
+
+func (agent *ecsAgent) initializeTaskENIDependencies(state dockerstate.TaskEngineState, taskEngine engine.TaskEngine) (error, bool) {
+	return errors.New("unsupported platform"), true
+}
 
 // startWindowsService runs the ECS agent as a Windows Service
 func (agent *ecsAgent) startWindowsService() int {
@@ -239,4 +248,19 @@ func (t *termHandlerIndicator) wait() uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.exitCode
+}
+
+func (agent *ecsAgent) initializeResourceFields(credentialsManager credentials.Manager) {
+	agent.resourceFields = &taskresource.ResourceFields{
+		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
+			ASMClientCreator:   factory.NewClientCreator(),
+			CredentialsManager: credentialsManager,
+		},
+		Ctx:          agent.ctx,
+		DockerClient: agent.dockerClient,
+	}
+}
+
+func (agent *ecsAgent) cgroupInit() error {
+	return errors.New("unsupported platform")
 }

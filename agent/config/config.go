@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -17,16 +17,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"reflect"
-	"strconv"
 	"strings"
 	"time"
 
+	apierrors "github.com/aws/amazon-ecs-agent/agent/api/errors"
+	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
-	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/cihub/seelog"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
@@ -36,6 +35,10 @@ const (
 	// http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml?search=docker
 	DockerReservedPort    = 2375
 	DockerReservedSSLPort = 2376
+	// DockerTagSeparator is the charactor used to separate names and tag in docker
+	DockerTagSeparator = ":"
+	// DockerDefaultTag is the default tag used by docker
+	DefaultDockerTag = "latest"
 
 	SSHPort = 22
 
@@ -55,8 +58,8 @@ const (
 	// clean up task's containers.
 	DefaultTaskCleanupWaitDuration = 3 * time.Hour
 
-	// DefaultDockerStopTimeout specifies the value for container stop timeout duration
-	DefaultDockerStopTimeout = 30 * time.Second
+	// defaultDockerStopTimeout specifies the value for container stop timeout duration
+	defaultDockerStopTimeout = 30 * time.Second
 
 	// DefaultImageCleanupTimeInterval specifies the default value for image cleanup duration. It is used to
 	// remove the images pulled by agent.
@@ -66,7 +69,7 @@ const (
 	// image cleanup.
 	DefaultNumImagesToDeletePerCycle = 5
 
-	//DefaultImageDeletionAge specifies the default value for minimum amount of elapsed time after an image
+	// DefaultImageDeletionAge specifies the default value for minimum amount of elapsed time after an image
 	// has been pulled before it can be deleted.
 	DefaultImageDeletionAge = 1 * time.Hour
 
@@ -93,6 +96,33 @@ const (
 
 	// pauseContainerTarball is the path to the pause container tarball
 	pauseContainerTarballPath = "/images/amazon-ecs-pause.tar"
+
+	// DefaultTaskMetadataSteadyStateRate is set as 40. This is arrived from our benchmarking
+	// results where task endpoint can handle 4000 rps effectively. Here, 100 containers
+	// will be able to send out 40 rps.
+	DefaultTaskMetadataSteadyStateRate = 40
+
+	// DefaultTaskMetadataBurstRate is set to handle 60 burst requests at once
+	DefaultTaskMetadataBurstRate = 60
+)
+
+const (
+	// ImagePullDefaultBehavior specifies the behavior that if an image pull API call fails,
+	// agent tries to start from the Docker image cache anyway, assuming that the image has not changed.
+	ImagePullDefaultBehavior ImagePullBehaviorType = iota
+
+	// ImagePullAlwaysBehavior specifies the behavior that if an image pull API call fails,
+	// the task fails instead of using cached image.
+	ImagePullAlwaysBehavior
+
+	// ImagePullOnceBehavior specifies the behavior that agent will only attempt to pull
+	// the same image once, once an image is pulled, local image cache will be used
+	// for all the containers.
+	ImagePullOnceBehavior
+
+	// ImagePullPreferCachedBehavior specifies the behavior that agent will only attempt to pull
+	// the image if there is no cached image.
+	ImagePullPreferCachedBehavior
 )
 
 var (
@@ -122,16 +152,128 @@ func (cfg *Config) Merge(rhs Config) *Config {
 	return cfg //make it chainable
 }
 
-// complete returns true if all fields of the config are populated / nonzero
-func (cfg *Config) complete() bool {
+// NewConfig returns a config struct created by merging environment variables,
+// a config file, and EC2 Metadata info.
+// The 'config' struct it returns can be used, even if an error is returned. An
+// error is returned, however, if the config is incomplete in some way that is
+// considered fatal.
+func NewConfig(ec2client ec2.EC2MetadataClient) (*Config, error) {
+	var errs []error
+	envConfig, err := environmentConfig() //Environment overrides all else
+	if err != nil {
+		errs = append(errs, err)
+	}
+	config := &envConfig
+
+	if config.complete() {
+		// No need to do file / network IO
+		return config, nil
+	}
+
+	fcfg, err := fileConfig()
+	if err != nil {
+		errs = append(errs, err)
+	}
+	config.Merge(fcfg)
+
+	if config.AWSRegion == "" {
+		// Get it from metadata only if we need to (network io)
+		config.Merge(ec2MetadataConfig(ec2client))
+	}
+
+	return config, config.mergeDefaultConfig(errs)
+}
+
+func (config *Config) mergeDefaultConfig(errs []error) error {
+	config.trimWhitespace()
+	config.Merge(DefaultConfig())
+	err := config.validateAndOverrideBounds()
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) != 0 {
+		return apierrors.NewMultiError(errs...)
+	}
+	return nil
+}
+
+// trimWhitespace trims whitespace from all string cfg values with the
+// `trim` tag
+func (cfg *Config) trimWhitespace() {
 	cfgElem := reflect.ValueOf(cfg).Elem()
+	cfgStructField := reflect.Indirect(reflect.ValueOf(cfg)).Type()
 
 	for i := 0; i < cfgElem.NumField(); i++ {
-		if utils.ZeroOrNil(cfgElem.Field(i).Interface()) {
-			return false
+		cfgField := cfgElem.Field(i)
+		if !cfgField.CanInterface() {
+			continue
+		}
+		trimTag := cfgStructField.Field(i).Tag.Get("trim")
+		if len(trimTag) == 0 {
+			continue
+		}
+
+		if cfgField.Kind() != reflect.String {
+			seelog.Warnf("Cannot trim non-string field type %v index %v", cfgField.Kind().String(), i)
+			continue
+		}
+		str := cfgField.Interface().(string)
+		cfgField.SetString(strings.TrimSpace(str))
+	}
+}
+
+// validateAndOverrideBounds performs validation over members of the Config struct
+// and check the value against the minimum required value.
+func (cfg *Config) validateAndOverrideBounds() error {
+	err := cfg.checkMissingAndDepreciated()
+	if err != nil {
+		return err
+	}
+
+	if cfg.DockerStopTimeout < minimumDockerStopTimeout {
+		return fmt.Errorf("config: invalid value for docker container stop timeout: %v", cfg.DockerStopTimeout.String())
+	}
+
+	if cfg.ContainerStartTimeout < minimumContainerStartTimeout {
+		return fmt.Errorf("config: invalid value for docker container start timeout: %v", cfg.ContainerStartTimeout.String())
+	}
+	var badDrivers []string
+	for _, driver := range cfg.AvailableLoggingDrivers {
+		_, ok := dockerclient.LoggingDriverMinimumVersion[driver]
+		if !ok {
+			badDrivers = append(badDrivers, string(driver))
 		}
 	}
-	return true
+	if len(badDrivers) > 0 {
+		return errors.New("Invalid logging drivers: " + strings.Join(badDrivers, ", "))
+	}
+
+	// If a value has been set for taskCleanupWaitDuration and the value is less than the minimum allowed cleanup duration,
+	// print a warning and override it
+	if cfg.TaskCleanupWaitDuration < minimumTaskCleanupWaitDuration {
+		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultTaskCleanupWaitDuration.String(), cfg.TaskCleanupWaitDuration, minimumTaskCleanupWaitDuration)
+		cfg.TaskCleanupWaitDuration = DefaultTaskCleanupWaitDuration
+	}
+
+	if cfg.ImageCleanupInterval < minimumImageCleanupInterval {
+		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultImageCleanupTimeInterval.String(), cfg.ImageCleanupInterval, minimumImageCleanupInterval)
+		cfg.ImageCleanupInterval = DefaultImageCleanupTimeInterval
+	}
+
+	if cfg.NumImagesToDeletePerCycle < minimumNumImagesToDeletePerCycle {
+		seelog.Warnf("Invalid value for number of images to delete for image cleanup, will be overridden with the default value: %d. Parsed value: %d, minimum value: %d.", DefaultImageDeletionAge, cfg.NumImagesToDeletePerCycle, minimumNumImagesToDeletePerCycle)
+		cfg.NumImagesToDeletePerCycle = DefaultNumImagesToDeletePerCycle
+	}
+
+	if cfg.TaskMetadataSteadyStateRate <= 0 || cfg.TaskMetadataBurstRate <= 0 {
+		seelog.Warnf("Invalid values for rate limits, will be overridden with default values: %d,%d.", DefaultTaskMetadataSteadyStateRate, DefaultTaskMetadataBurstRate)
+		cfg.TaskMetadataSteadyStateRate = DefaultTaskMetadataSteadyStateRate
+		cfg.TaskMetadataBurstRate = DefaultTaskMetadataBurstRate
+	}
+
+	cfg.platformOverrides()
+
+	return nil
 }
 
 // checkMissingAndDeprecated checks all zero-valued fields for tags of the form
@@ -174,29 +316,16 @@ func (cfg *Config) checkMissingAndDepreciated() error {
 	return nil
 }
 
-// trimWhitespace trims whitespace from all string cfg values with the
-// `trim` tag
-func (cfg *Config) trimWhitespace() {
+// complete returns true if all fields of the config are populated / nonzero
+func (cfg *Config) complete() bool {
 	cfgElem := reflect.ValueOf(cfg).Elem()
-	cfgStructField := reflect.Indirect(reflect.ValueOf(cfg)).Type()
 
 	for i := 0; i < cfgElem.NumField(); i++ {
-		cfgField := cfgElem.Field(i)
-		if !cfgField.CanInterface() {
-			continue
+		if utils.ZeroOrNil(cfgElem.Field(i).Interface()) {
+			return false
 		}
-		trimTag := cfgStructField.Field(i).Tag.Get("trim")
-		if len(trimTag) == 0 {
-			continue
-		}
-
-		if cfgField.Kind() != reflect.String {
-			seelog.Warnf("Cannot trim non-string field type %v index %v", cfgField.Kind().String(), i)
-			continue
-		}
-		str := cfgField.Interface().(string)
-		cfgField.SetString(strings.TrimSpace(str))
 	}
+	return true
 }
 
 func fileConfig() (Config, error) {
@@ -233,216 +362,65 @@ func fileConfig() (Config, error) {
 // environmentConfig reads the given configs from the environment and attempts
 // to convert them to the given type
 func environmentConfig() (Config, error) {
-	var errs []error
-	endpoint := os.Getenv("ECS_BACKEND_HOST")
-
-	clusterRef := os.Getenv("ECS_CLUSTER")
-	awsRegion := os.Getenv("AWS_DEFAULT_REGION")
-
-	dockerEndpoint := os.Getenv("DOCKER_HOST")
-	engineAuthType := os.Getenv("ECS_ENGINE_AUTH_TYPE")
-	engineAuthData := os.Getenv("ECS_ENGINE_AUTH_DATA")
-
-	var checkpoint bool
 	dataDir := os.Getenv("ECS_DATADIR")
-	if dataDir != "" {
-		// if we have a directory to checkpoint to, default it to be on
-		checkpoint = utils.ParseBool(os.Getenv("ECS_CHECKPOINT"), true)
-	} else {
-		// if the directory is not set, default to checkpointing off for
-		// backwards compatibility
-		checkpoint = utils.ParseBool(os.Getenv("ECS_CHECKPOINT"), false)
-	}
 
-	// Format: json array, e.g. [1,2,3]
-	reservedPortEnv := os.Getenv("ECS_RESERVED_PORTS")
-	portDecoder := json.NewDecoder(strings.NewReader(reservedPortEnv))
-	var reservedPorts []uint16
-	err := portDecoder.Decode(&reservedPorts)
-	// EOF means the string was blank as opposed to UnexepctedEof which means an
-	// invalid parse
-	// Blank is not a warning; we have sane defaults
-	if err != io.EOF && err != nil {
-		err := fmt.Errorf("Invalid format for \"ECS_RESERVED_PORTS\" environment variable; expected a JSON array like [1,2,3]. err %v", err)
-		seelog.Warn(err)
-	}
-
-	reservedPortUDPEnv := os.Getenv("ECS_RESERVED_PORTS_UDP")
-	portDecoderUDP := json.NewDecoder(strings.NewReader(reservedPortUDPEnv))
-	var reservedPortsUDP []uint16
-	err = portDecoderUDP.Decode(&reservedPortsUDP)
-	// EOF means the string was blank as opposed to UnexepctedEof which means an
-	// invalid parse
-	// Blank is not a warning; we have sane defaults
-	if err != io.EOF && err != nil {
-		err := fmt.Errorf("Invalid format for \"ECS_RESERVED_PORTS_UDP\" environment variable; expected a JSON array like [1,2,3]. err %v", err)
-		seelog.Warn(err)
-	}
-
-	updateDownloadDir := os.Getenv("ECS_UPDATE_DOWNLOAD_DIR")
-	updatesEnabled := utils.ParseBool(os.Getenv("ECS_UPDATES_ENABLED"), false)
-
-	disableMetrics := utils.ParseBool(os.Getenv("ECS_DISABLE_METRICS"), false)
-
-	reservedMemory := parseEnvVariableUint16("ECS_RESERVED_MEMORY")
-
-	var dockerStopTimeout time.Duration
-	parsedStopTimeout := parseEnvVariableDuration("ECS_CONTAINER_STOP_TIMEOUT")
-	if parsedStopTimeout >= minimumDockerStopTimeout {
-		dockerStopTimeout = parsedStopTimeout
-	} else if parsedStopTimeout != 0 {
-		seelog.Warnf("Discarded invalid value for docker stop timeout, parsed as: %v", parsedStopTimeout)
-	}
-
-	taskCleanupWaitDuration := parseEnvVariableDuration("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION")
-
-	availableLoggingDriversEnv := os.Getenv("ECS_AVAILABLE_LOGGING_DRIVERS")
-	loggingDriverDecoder := json.NewDecoder(strings.NewReader(availableLoggingDriversEnv))
-	var availableLoggingDrivers []dockerclient.LoggingDriver
-	err = loggingDriverDecoder.Decode(&availableLoggingDrivers)
-	// EOF means the string was blank as opposed to UnexpectedEof which means an
-	// invalid parse
-	// Blank is not a warning; we have sane defaults
-	if err != io.EOF && err != nil {
-		err := fmt.Errorf("Invalid format for \"ECS_AVAILABLE_LOGGING_DRIVERS\" environment variable; expected a JSON array like [\"json-file\",\"syslog\"]. err %v", err)
-		seelog.Warn(err)
-	}
-
-	privilegedDisabled := utils.ParseBool(os.Getenv("ECS_DISABLE_PRIVILEGED"), false)
-	seLinuxCapable := utils.ParseBool(os.Getenv("ECS_SELINUX_CAPABLE"), false)
-	appArmorCapable := utils.ParseBool(os.Getenv("ECS_APPARMOR_CAPABLE"), false)
-	taskENIEnabled := utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_ENI"), false)
-	taskIAMRoleEnabled := utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE"), false)
-	taskIAMRoleEnabledForNetworkHost := utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST"), false)
-	overrideAWSLogsExecutionRoleEnabled := utils.ParseBool(os.Getenv("ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE"), false)
-
-	var taskCPUMemLimitEnabled Conditional
-	taskCPUMemLimitConfigString := os.Getenv("ECS_ENABLE_TASK_CPU_MEM_LIMIT")
-
-	// We only want to set taskCPUMemLimit if it is explicitly set to true or false.
-	// We can do this by checking against the ParseBool default
-	if taskCPUMemLimitConfigString != "" {
-		if utils.ParseBool(taskCPUMemLimitConfigString, false) {
-			taskCPUMemLimitEnabled = ExplicitlyEnabled
-		} else {
-			taskCPUMemLimitEnabled = ExplicitlyDisabled
-		}
-	}
-
-	credentialsAuditLogFile := os.Getenv("ECS_AUDIT_LOGFILE")
-	credentialsAuditLogDisabled := utils.ParseBool(os.Getenv("ECS_AUDIT_LOGFILE_DISABLED"), false)
-
-	imageCleanupDisabled := utils.ParseBool(os.Getenv("ECS_DISABLE_IMAGE_CLEANUP"), false)
-	minimumImageDeletionAge := parseEnvVariableDuration("ECS_IMAGE_MINIMUM_CLEANUP_AGE")
-	imageCleanupInterval := parseEnvVariableDuration("ECS_IMAGE_CLEANUP_INTERVAL")
-	numImagesToDeletePerCycleEnvVal := os.Getenv("ECS_NUM_IMAGES_DELETE_PER_CYCLE")
-	numImagesToDeletePerCycle, err := strconv.Atoi(numImagesToDeletePerCycleEnvVal)
-	if numImagesToDeletePerCycleEnvVal != "" && err != nil {
-		seelog.Warnf("Invalid format for \"ECS_NUM_IMAGES_DELETE_PER_CYCLE\", expected an integer. err %v", err)
-	}
-
-	cniPluginsPath := os.Getenv("ECS_CNI_PLUGINS_PATH")
-	awsVPCBlockInstanceMetadata := utils.ParseBool(os.Getenv("ECS_AWSVPC_BLOCK_IMDS"), false)
+	steadyStateRate, burstRate := parseTaskMetadataThrottles()
 
 	var instanceAttributes map[string]string
-	instanceAttributesEnv := os.Getenv("ECS_INSTANCE_ATTRIBUTES")
-	err = json.Unmarshal([]byte(instanceAttributesEnv), &instanceAttributes)
-	if instanceAttributesEnv != "" {
-		if err != nil {
-			wrappedErr := fmt.Errorf("Invalid format for ECS_INSTANCE_ATTRIBUTES. Expected a json hash: %v", err)
-			seelog.Error(wrappedErr)
-			errs = append(errs, wrappedErr)
-		}
-	}
-	for attributeKey, attributeValue := range instanceAttributes {
-		seelog.Debugf("Setting instance attribute %v: %v", attributeKey, attributeValue)
-	}
+	var errs []error
+	instanceAttributes, errs = parseInstanceAttributes(errs)
 
 	var additionalLocalRoutes []cnitypes.IPNet
-	additionalLocalRoutesEnv := os.Getenv("ECS_AWSVPC_ADDITIONAL_LOCAL_ROUTES")
-	if additionalLocalRoutesEnv != "" {
-		err := json.Unmarshal([]byte(additionalLocalRoutesEnv), &additionalLocalRoutes)
-		if err != nil {
-			seelog.Errorf("Invalid format for ECS_AWSVPC_ADDITIONAL_LOCAL_ROUTES, expected a json array of CIDRs: %v", err)
-			errs = append(errs, err)
-		}
-	}
-	containerMetadataEnabled := utils.ParseBool(os.Getenv("ECS_ENABLE_CONTAINER_METADATA"), false)
-	dataDirOnHost := os.Getenv("ECS_HOST_DATA_DIR")
+	additionalLocalRoutes, errs = parseAdditionalLocalRoutes(errs)
 
+	var err error
 	if len(errs) > 0 {
-		err = utils.NewMultiError(errs...)
-	} else {
-		err = nil
+		err = apierrors.NewMultiError(errs...)
 	}
 	return Config{
-		Cluster:                          clusterRef,
-		APIEndpoint:                      endpoint,
-		AWSRegion:                        awsRegion,
-		DockerEndpoint:                   dockerEndpoint,
-		ReservedPorts:                    reservedPorts,
-		ReservedPortsUDP:                 reservedPortsUDP,
+		Cluster:                          os.Getenv("ECS_CLUSTER"),
+		APIEndpoint:                      os.Getenv("ECS_BACKEND_HOST"),
+		AWSRegion:                        os.Getenv("AWS_DEFAULT_REGION"),
+		DockerEndpoint:                   os.Getenv("DOCKER_HOST"),
+		ReservedPorts:                    parseReservedPorts("ECS_RESERVED_PORTS"),
+		ReservedPortsUDP:                 parseReservedPorts("ECS_RESERVED_PORTS_UDP"),
 		DataDir:                          dataDir,
-		Checkpoint:                       checkpoint,
-		EngineAuthType:                   engineAuthType,
-		EngineAuthData:                   NewSensitiveRawMessage([]byte(engineAuthData)),
-		UpdatesEnabled:                   updatesEnabled,
-		UpdateDownloadDir:                updateDownloadDir,
-		DisableMetrics:                   disableMetrics,
-		ReservedMemory:                   reservedMemory,
-		AvailableLoggingDrivers:          availableLoggingDrivers,
-		PrivilegedDisabled:               privilegedDisabled,
-		SELinuxCapable:                   seLinuxCapable,
-		AppArmorCapable:                  appArmorCapable,
-		TaskCleanupWaitDuration:          taskCleanupWaitDuration,
-		TaskENIEnabled:                   taskENIEnabled,
-		TaskIAMRoleEnabled:               taskIAMRoleEnabled,
-		TaskCPUMemLimit:                  taskCPUMemLimitEnabled,
-		DockerStopTimeout:                dockerStopTimeout,
-		CredentialsAuditLogFile:          credentialsAuditLogFile,
-		CredentialsAuditLogDisabled:      credentialsAuditLogDisabled,
-		TaskIAMRoleEnabledForNetworkHost: taskIAMRoleEnabledForNetworkHost,
-		ImageCleanupDisabled:             imageCleanupDisabled,
-		MinimumImageDeletionAge:          minimumImageDeletionAge,
-		ImageCleanupInterval:             imageCleanupInterval,
-		NumImagesToDeletePerCycle:        numImagesToDeletePerCycle,
+		Checkpoint:                       parseCheckpoint(dataDir),
+		EngineAuthType:                   os.Getenv("ECS_ENGINE_AUTH_TYPE"),
+		EngineAuthData:                   NewSensitiveRawMessage([]byte(os.Getenv("ECS_ENGINE_AUTH_DATA"))),
+		UpdatesEnabled:                   utils.ParseBool(os.Getenv("ECS_UPDATES_ENABLED"), false),
+		UpdateDownloadDir:                os.Getenv("ECS_UPDATE_DOWNLOAD_DIR"),
+		DisableMetrics:                   utils.ParseBool(os.Getenv("ECS_DISABLE_METRICS"), false),
+		ReservedMemory:                   parseEnvVariableUint16("ECS_RESERVED_MEMORY"),
+		AvailableLoggingDrivers:          parseAvailableLoggingDrivers(),
+		PrivilegedDisabled:               utils.ParseBool(os.Getenv("ECS_DISABLE_PRIVILEGED"), false),
+		SELinuxCapable:                   utils.ParseBool(os.Getenv("ECS_SELINUX_CAPABLE"), false),
+		AppArmorCapable:                  utils.ParseBool(os.Getenv("ECS_APPARMOR_CAPABLE"), false),
+		TaskCleanupWaitDuration:          parseEnvVariableDuration("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION"),
+		TaskENIEnabled:                   utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_ENI"), false),
+		TaskIAMRoleEnabled:               utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE"), false),
+		TaskCPUMemLimit:                  parseTaskCPUMemLimitEnabled(),
+		DockerStopTimeout:                parseDockerStopTimeout(),
+		ContainerStartTimeout:            parseContainerStartTimeout(),
+		CredentialsAuditLogFile:          os.Getenv("ECS_AUDIT_LOGFILE"),
+		CredentialsAuditLogDisabled:      utils.ParseBool(os.Getenv("ECS_AUDIT_LOGFILE_DISABLED"), false),
+		TaskIAMRoleEnabledForNetworkHost: utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST"), false),
+		ImageCleanupDisabled:             utils.ParseBool(os.Getenv("ECS_DISABLE_IMAGE_CLEANUP"), false),
+		MinimumImageDeletionAge:          parseEnvVariableDuration("ECS_IMAGE_MINIMUM_CLEANUP_AGE"),
+		ImageCleanupInterval:             parseEnvVariableDuration("ECS_IMAGE_CLEANUP_INTERVAL"),
+		NumImagesToDeletePerCycle:        parseNumImagesToDeletePerCycle(),
+		ImagePullBehavior:                parseImagePullBehavior(),
 		InstanceAttributes:               instanceAttributes,
-		CNIPluginsPath:                   cniPluginsPath,
-		AWSVPCBlockInstanceMetdata:       awsVPCBlockInstanceMetadata,
+		CNIPluginsPath:                   os.Getenv("ECS_CNI_PLUGINS_PATH"),
+		AWSVPCBlockInstanceMetdata:       utils.ParseBool(os.Getenv("ECS_AWSVPC_BLOCK_IMDS"), false),
 		AWSVPCAdditionalLocalRoutes:      additionalLocalRoutes,
-		ContainerMetadataEnabled:         containerMetadataEnabled,
-		DataDirOnHost:                    dataDirOnHost,
-		OverrideAWSLogsExecutionRole:     overrideAWSLogsExecutionRoleEnabled,
+		ContainerMetadataEnabled:         utils.ParseBool(os.Getenv("ECS_ENABLE_CONTAINER_METADATA"), false),
+		DataDirOnHost:                    os.Getenv("ECS_HOST_DATA_DIR"),
+		OverrideAWSLogsExecutionRole:     utils.ParseBool(os.Getenv("ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE"), false),
+		CgroupPath:                       os.Getenv("ECS_CGROUP_PATH"),
+		TaskMetadataSteadyStateRate:      steadyStateRate,
+		TaskMetadataBurstRate:            burstRate,
 	}, err
-}
-
-func parseEnvVariableUint16(envVar string) uint16 {
-	envVal := os.Getenv(envVar)
-	var var16 uint16
-	if envVal != "" {
-		var64, err := strconv.ParseUint(envVal, 10, 16)
-		if err != nil {
-			seelog.Warnf("Invalid format for \""+envVar+"\" environment variable; expected unsigned integer. err %v", err)
-		} else {
-			var16 = uint16(var64)
-		}
-	}
-	return var16
-}
-
-func parseEnvVariableDuration(envVar string) time.Duration {
-	var duration time.Duration
-	envVal := os.Getenv(envVar)
-	if envVal == "" {
-		seelog.Debugf("Environment variable empty: %v", envVar)
-	} else {
-		var err error
-		duration, err = time.ParseDuration(envVal)
-		if err != nil {
-			seelog.Warnf("Could not parse duration value: %v for Environment Variable %v : %v", envVal, envVar, err)
-		}
-	}
-	return duration
 }
 
 func ec2MetadataConfig(ec2client ec2.EC2MetadataClient) Config {
@@ -452,96 +430,6 @@ func ec2MetadataConfig(ec2client ec2.EC2MetadataClient) Config {
 		return Config{}
 	}
 	return Config{AWSRegion: iid.Region}
-}
-
-// NewConfig returns a config struct created by merging environment variables,
-// a config file, and EC2 Metadata info.
-// The 'config' struct it returns can be used, even if an error is returned. An
-// error is returned, however, if the config is incomplete in some way that is
-// considered fatal.
-func NewConfig(ec2client ec2.EC2MetadataClient) (config *Config, err error) {
-	var errs []error
-	var errTmp error
-	envConfig, errTmp := environmentConfig() //Environment overrides all else
-	if errTmp != nil {
-		errs = append(errs, errTmp)
-	}
-	config = &envConfig
-	defer func() {
-		config.trimWhitespace()
-		config.Merge(DefaultConfig())
-		errTmp = config.validateAndOverrideBounds()
-		if errTmp != nil {
-			errs = append(errs, errTmp)
-		}
-		if len(errs) != 0 {
-			err = utils.NewMultiError(errs...)
-		} else {
-			err = nil
-		}
-	}()
-
-	if config.complete() {
-		// No need to do file / network IO
-		return config, nil
-	}
-
-	fcfg, errTmp := fileConfig()
-	if errTmp != nil {
-		errs = append(errs, errTmp)
-	}
-	config.Merge(fcfg)
-
-	if config.AWSRegion == "" {
-		// Get it from metadata only if we need to (network io)
-		config.Merge(ec2MetadataConfig(ec2client))
-	}
-
-	return config, err
-}
-
-// validateAndOverrideBounds performs validation over members of the Config struct
-// and check the value against the minimum required value.
-func (cfg *Config) validateAndOverrideBounds() error {
-	err := cfg.checkMissingAndDepreciated()
-	if err != nil {
-		return err
-	}
-
-	if cfg.DockerStopTimeout < minimumDockerStopTimeout {
-		return fmt.Errorf("Invalid negative DockerStopTimeout: %v", cfg.DockerStopTimeout.String())
-	}
-	var badDrivers []string
-	for _, driver := range cfg.AvailableLoggingDrivers {
-		_, ok := dockerclient.LoggingDriverMinimumVersion[driver]
-		if !ok {
-			badDrivers = append(badDrivers, string(driver))
-		}
-	}
-	if len(badDrivers) > 0 {
-		return errors.New("Invalid logging drivers: " + strings.Join(badDrivers, ", "))
-	}
-
-	// If a value has been set for taskCleanupWaitDuration and the value is less than the minimum allowed cleanup duration,
-	// print a warning and override it
-	if cfg.TaskCleanupWaitDuration < minimumTaskCleanupWaitDuration {
-		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultTaskCleanupWaitDuration.String(), cfg.TaskCleanupWaitDuration, minimumTaskCleanupWaitDuration)
-		cfg.TaskCleanupWaitDuration = DefaultTaskCleanupWaitDuration
-	}
-
-	if cfg.ImageCleanupInterval < minimumImageCleanupInterval {
-		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultImageCleanupTimeInterval.String(), cfg.ImageCleanupInterval, minimumImageCleanupInterval)
-		cfg.ImageCleanupInterval = DefaultImageCleanupTimeInterval
-	}
-
-	if cfg.NumImagesToDeletePerCycle < minimumNumImagesToDeletePerCycle {
-		seelog.Warnf("Invalid value for number of images to delete for image cleanup, will be overriden with the default value: %d. Parsed value: %d, minimum value: %d.", DefaultImageDeletionAge, cfg.NumImagesToDeletePerCycle, minimumNumImagesToDeletePerCycle)
-		cfg.NumImagesToDeletePerCycle = DefaultNumImagesToDeletePerCycle
-	}
-
-	cfg.platformOverrides()
-
-	return nil
 }
 
 // String returns a lossy string representation of the config suitable for human readable display.
@@ -558,6 +446,7 @@ func (cfg *Config) String() string {
 			"ReservedMem: %v, "+
 			"TaskCleanupWaitDuration: %v, "+
 			"DockerStopTimeout: %v, "+
+			"ContainerStartTimeout: %v, "+
 			"TaskCPUMemLimit: %v, "+
 			"%s",
 		cfg.Cluster,
@@ -570,6 +459,7 @@ func (cfg *Config) String() string {
 		cfg.ReservedMemory,
 		cfg.TaskCleanupWaitDuration,
 		cfg.DockerStopTimeout,
+		cfg.ContainerStartTimeout,
 		cfg.TaskCPUMemLimit,
 		cfg.platformString(),
 	)

@@ -1,5 +1,6 @@
-//+build !integration
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//+build unit
+
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -33,36 +34,6 @@ func TestIsNetworkStatsError(t *testing.T) {
 	if !isNetStatsErr {
 		// Expect this to be a net stats error
 		t.Error("Error incorrectly reported as non network stats error")
-	}
-}
-
-func TestDockerStatsToContainerStatsCpuUsage(t *testing.T) {
-	// doing this with json makes me sad, but is the easiest way to deal with
-	// the inner structs
-
-	// numCores is a global variable in package agent/stas
-	// whichdenotes the number of cpu cores
-	numCores = 4
-	jsonStat := fmt.Sprintf(`
-		{
-			"cpu_stats":{
-				"cpu_usage":{
-					"percpu_usage":[%d, %d, %d, %d],
-					"total_usage":%d
-				}
-			}
-		}`, 1, 2, 3, 4, 100)
-	dockerStat := &docker.Stats{}
-	json.Unmarshal([]byte(jsonStat), dockerStat)
-	containerStats, err := dockerStatsToContainerStats(dockerStat)
-	if err != nil {
-		t.Errorf("Error converting container stats: %v", err)
-	}
-	if containerStats == nil {
-		t.Fatal("containerStats should not be nil")
-	}
-	if containerStats.cpuUsage != 25 {
-		t.Error("Unexpected value for cpuUsage", containerStats.cpuUsage)
 	}
 }
 

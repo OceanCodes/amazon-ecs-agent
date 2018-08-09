@@ -16,9 +16,10 @@ package stats
 import (
 	"time"
 
-	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	"context"
+
+	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
-	"golang.org/x/net/context"
 )
 
 // ContainerStats encapsulates the raw CPU and memory utilization from cgroup fs.
@@ -46,7 +47,7 @@ type StatsContainer struct {
 	containerMetadata *ContainerMetadata
 	ctx               context.Context
 	cancel            context.CancelFunc
-	client            ecsengine.DockerClient
+	client            dockerapi.DockerClient
 	statsQueue        *Queue
 	resolver          resolver.ContainerMetadataResolver
 }

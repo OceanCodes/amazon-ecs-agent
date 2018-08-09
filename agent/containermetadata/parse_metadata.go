@@ -1,4 +1,4 @@
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,7 +16,8 @@ package containermetadata
 import (
 	"fmt"
 
-	"github.com/aws/amazon-ecs-agent/agent/api"
+	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
+	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 
 	"github.com/cihub/seelog"
 	docker "github.com/fsouza/go-dockerclient"
@@ -27,10 +28,15 @@ import (
 // available prior to container creation
 // Since we accept incomplete metadata fields, we should not return
 // errors here and handle them at this or the above stage.
-func (manager *metadataManager) parseMetadataAtContainerCreate(taskARN string, containerName string) Metadata {
+func (manager *metadataManager) parseMetadataAtContainerCreate(task *apitask.Task, containerName string) Metadata {
 	return Metadata{
-		cluster:              manager.cluster,
-		taskMetadata:         TaskMetadata{containerName: containerName, taskARN: taskARN},
+		cluster: manager.cluster,
+		taskMetadata: TaskMetadata{
+			containerName:          containerName,
+			taskARN:                task.Arn,
+			taskDefinitionFamily:   task.Family,
+			taskDefinitionRevision: task.Version,
+		},
 		containerInstanceARN: manager.containerInstanceARN,
 		metadataStatus:       MetadataInitial,
 	}
@@ -40,11 +46,16 @@ func (manager *metadataManager) parseMetadataAtContainerCreate(taskARN string, c
 // configuration and data then packages it for JSON Marshaling
 // Since we accept incomplete metadata fields, we should not return
 // errors here and handle them at this or the above stage.
-func (manager *metadataManager) parseMetadata(dockerContainer *docker.Container, taskARN string, containerName string) Metadata {
-	dockerMD := parseDockerContainerMetadata(taskARN, containerName, dockerContainer)
+func (manager *metadataManager) parseMetadata(dockerContainer *docker.Container, task *apitask.Task, containerName string) Metadata {
+	dockerMD := parseDockerContainerMetadata(task.Arn, containerName, dockerContainer)
 	return Metadata{
-		cluster:                 manager.cluster,
-		taskMetadata:            TaskMetadata{containerName: containerName, taskARN: taskARN},
+		cluster: manager.cluster,
+		taskMetadata: TaskMetadata{
+			containerName:          containerName,
+			taskARN:                task.Arn,
+			taskDefinitionFamily:   task.Family,
+			taskDefinitionRevision: task.Version,
+		},
 		dockerContainerMetadata: dockerMD,
 		containerInstanceARN:    manager.containerInstanceARN,
 		metadataStatus:          MetadataReady,
@@ -77,8 +88,8 @@ func parseDockerContainerMetadata(taskARN string, containerName string, dockerCo
 	}
 
 	// Get Port bindings from NetworkSettings
-	var ports []api.PortBinding
-	ports, err = api.PortBindingFromDockerPortBinding(dockerContainer.NetworkSettings.Ports)
+	var ports []apicontainer.PortBinding
+	ports, err = apicontainer.PortBindingFromDockerPortBinding(dockerContainer.NetworkSettings.Ports)
 	if err != nil {
 		seelog.Warnf("Failed to parse container metadata for task %s container %s: %v", taskARN, containerName, err)
 	}

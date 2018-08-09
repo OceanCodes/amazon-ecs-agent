@@ -1,6 +1,6 @@
-// +build linux
+// +build linux,unit
 
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -54,7 +54,7 @@ func TestGetMACAddress(t *testing.T) {
 	ctx := context.TODO()
 	mac, err := GetMACAddress(ctx, time.Millisecond, randomDevice, mockNetlink)
 	assert.Nil(t, err)
-	assert.Equal(t, mac, validMAC)
+	assert.Equal(t, validMAC, mac)
 }
 
 // TestGetMACAddressWithNetlinkError attempts to test the netlinkClient
@@ -95,11 +95,11 @@ func TestGetMACAddressNotFoundRetry(t *testing.T) {
 		}, nil),
 	)
 	ctx := context.TODO()
-	// Set max retry duration to twice that of the min backoff to ensure that there's
+	// Set max retry duration to twice that of the max backoff to ensure that there's
 	// enough time to retry
-	mac, err := GetMACAddress(ctx, 2*macAddressBackoffMin, randomDevice, mockNetlink)
+	mac, err := GetMACAddress(ctx, 2*macAddressBackoffMax, randomDevice, mockNetlink)
 	assert.NoError(t, err)
-	assert.Equal(t, mac, validMAC)
+	assert.Equal(t, validMAC, mac)
 }
 
 // TestGetMACAddressNotFoundRetryExpires tests if the backoff-retry logic for
@@ -132,6 +132,6 @@ func TestIsValidDevicePathTableTest(t *testing.T) {
 
 	for _, entry := range table {
 		status := IsValidNetworkDevice(entry.input)
-		assert.Equal(t, status, entry.output)
+		assert.Equal(t, entry.output, status)
 	}
 }

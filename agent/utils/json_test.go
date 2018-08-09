@@ -1,4 +1,6 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// +build unit
+
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -37,7 +39,7 @@ func TestJsonKeys(t *testing.T) {
 		t.Error(err)
 	}
 	if len(keys) != 0 {
-		t.Error("Keys for empty objet should be empty")
+		t.Error("Keys for empty object should be empty")
 	}
 
 	_, err = JsonKeys([]byte(`[]`))

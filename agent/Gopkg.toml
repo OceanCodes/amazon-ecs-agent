@@ -20,14 +20,17 @@
 #  name = "github.com/x/y"
 #  version = "2.4.0"
 
+[prune]
+  go-tests = true
+  unused-packages = true
 
 [[constraint]]
   name = "github.com/aws/aws-sdk-go"
-  version = "1.10.30"
+  version = "1.13.42"
 
 [[constraint]]
   name = "github.com/cihub/seelog"
-  revision ="0fa7e41d2b9600ca6b7e1592478124e4f800f724"
+  version ="2.6"
 
 [[constraint]]
   name = "github.com/containerd/cgroups"
@@ -47,15 +50,15 @@
 
 [[constraint]]
   name = "github.com/fsouza/go-dockerclient"
-  revision ="d25e8d2941bd448756b336a2ec3abf79802d6ddf"
+  revision ="be08a2e7eafecb4d8c6bc61be94233a06904a121"
 
 [[constraint]]
   name = "github.com/golang/mock"
-  revision ="bd3c8e81be01eef76d4b503f5e687d2d1354d2d9"
+  revision ="58cd061d09382b6011f84c1291ebe50ef2e25bab"
 
 [[constraint]]
   name = "github.com/gorilla/websocket"
-  revision ="0868951cdb8e69bc42df4598bdc6164ff2f1a072"
+  version = "v1.2.0"
 
 [[constraint]]
   name = "github.com/opencontainers/runtime-spec"
@@ -78,10 +81,9 @@
   revision ="fe3b5664d23a11b52ba59bece4ff29c52772a56b"
 
 [[constraint]]
-  name = "golang.org/x/net"
+  name = "github.com/didip/tollbooth"
+  version = "3.0.2"
 
 [[constraint]]
-  name = "golang.org/x/sys"
-
-[[constraint]]
-  name = "golang.org/x/tools"
+  name = "github.com/gorilla/mux"
+  version = "1.6.2"

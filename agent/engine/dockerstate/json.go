@@ -17,30 +17,33 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/aws/amazon-ecs-agent/agent/api"
+	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
+	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
+	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	"github.com/aws/amazon-ecs-agent/agent/engine/image"
 )
 
 // These bits of information should be enough to reconstruct the entire
 // DockerTaskEngine state
 type savedState struct {
-	Tasks          []*api.Task
-	IdToContainer  map[string]*api.DockerContainer `json:"IdToContainer"` // DockerId -> api.DockerContainer
-	IdToTask       map[string]string               `json:"IdToTask"`      // DockerId -> taskarn
+	Tasks          []*apitask.Task
+	IdToContainer  map[string]*apicontainer.DockerContainer `json:"IdToContainer"` // DockerId -> apicontainer.DockerContainer
+	IdToTask       map[string]string                        `json:"IdToTask"`      // DockerId -> taskarn
 	ImageStates    []*image.ImageState
-	ENIAttachments []*api.ENIAttachment `json:enis`
+	ENIAttachments []*apieni.ENIAttachment `json:"ENIAttachments"`
+	IPToTask       map[string]string       `json:"IPToTask"`
 }
 
 func (state *DockerTaskEngineState) MarshalJSON() ([]byte, error) {
-	var toSave savedState
 	state.lock.RLock()
 	defer state.lock.RUnlock()
-	toSave = savedState{
-		Tasks:          state.allTasks(),
+	toSave := savedState{
+		Tasks:          state.allTasksUnsafe(),
 		IdToContainer:  state.idToContainer,
 		IdToTask:       state.idToTask,
-		ImageStates:    state.allImageStates(),
+		ImageStates:    state.allImageStatesUnsafe(),
 		ENIAttachments: state.allENIAttachmentsUnsafe(),
+		IPToTask:       state.ipToTask,
 	}
 	return json.Marshal(toSave)
 }
@@ -87,6 +90,10 @@ func (state *DockerTaskEngineState) UnmarshalJSON(data []byte) error {
 
 	for _, eniAttachment := range saved.ENIAttachments {
 		clean.AddENIAttachment(eniAttachment)
+	}
+
+	for ipAddr, taskARN := range saved.IPToTask {
+		clean.AddTaskIPAddress(ipAddr, taskARN)
 	}
 
 	*state = *clean

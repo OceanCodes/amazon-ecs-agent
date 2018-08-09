@@ -26,6 +26,8 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
+	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
+	apierrors "github.com/aws/amazon-ecs-agent/agent/api/errors"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/eni/netlinkwrapper"
 	"github.com/aws/amazon-ecs-agent/agent/eni/networkutils"
@@ -70,7 +72,7 @@ const (
 	// looking for an ENI's mac address on the host. It takes a few milliseconds
 	// for the host to learn about an ENIs mac address from netlink.LinkList().
 	// We are capping off this duration to 1s assuming worst-case behavior
-	macAddressRetryTimeout = time.Second
+	macAddressRetryTimeout = 2 * time.Second
 )
 
 // UdevWatcher maintains the state of attached ENIs
@@ -212,8 +214,8 @@ func (udevWatcher *UdevWatcher) sendENIStateChange(mac string) error {
 
 	// We found an ENI, which has the expiration time set in future and
 	// needs to be acknowledged as having been 'attached' to the Instance
-	go func(eni *api.ENIAttachment) {
-		eni.Status = api.ENIAttached
+	go func(eni *apieni.ENIAttachment) {
+		eni.Status = apieni.ENIAttached
 		log.Infof("Emitting ENI change event for: %s", eni.String())
 		udevWatcher.eniChangeEvent <- api.TaskStateChange{
 			TaskARN:    eni.TaskARN,
@@ -311,7 +313,7 @@ func (udevWatcher *UdevWatcher) sendENIStateChangeWithRetries(parentCtx context.
 				return sendErr
 			}
 			// Not unmanagedENIError. Stop retrying when this happens
-			return utils.NewRetriableError(utils.NewRetriable(false), sendErr)
+			return apierrors.NewRetriableError(apierrors.NewRetriable(false), sendErr)
 		}
 
 		return nil

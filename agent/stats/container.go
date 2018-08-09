@@ -17,10 +17,11 @@ import (
 	"errors"
 	"time"
 
-	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	"context"
+
+	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
 	"github.com/cihub/seelog"
-	"golang.org/x/net/context"
 )
 
 const (
@@ -32,7 +33,7 @@ const (
 	ContainerStatsBufferLength = 120
 )
 
-func newStatsContainer(dockerID string, client ecsengine.DockerClient, resolver resolver.ContainerMetadataResolver) *StatsContainer {
+func newStatsContainer(dockerID string, client dockerapi.DockerClient, resolver resolver.ContainerMetadataResolver) *StatsContainer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &StatsContainer{
 		containerMetadata: &ContainerMetadata{
@@ -66,7 +67,7 @@ func (container *StatsContainer) collect() {
 		default:
 			err := container.processStatsStream()
 			if err != nil {
-				// Currenlty, the only error that we get here is if go-dockerclient is unable
+				// Currently, the only error that we get here is if go-dockerclient is unable
 				// to decode the stats payload properly. Other errors such as
 				// 'NoSuchContainer', 'InactivityTimeoutExceeded' etc are silently consumed.
 				// We rely on state reconciliation with docker task engine at this point of
@@ -105,10 +106,7 @@ func (container *StatsContainer) processStatsStream() error {
 		return err
 	}
 	for rawStat := range dockerStats {
-		stat, err := dockerStatsToContainerStats(rawStat)
-		if err == nil {
-			container.statsQueue.Add(stat)
-		} else {
+		if err := container.statsQueue.Add(rawStat); err != nil {
 			seelog.Warnf("Error converting stats for container %s: %v", dockerID, err)
 		}
 	}

@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,36 +14,32 @@
 package tcshandler
 
 import (
-	"fmt"
+	"context"
 	"sync"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
+	"github.com/aws/amazon-ecs-agent/agent/stats"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 )
 
+// TelemetrySessionParams contains all the parameters required to start a tcs
+// session
 type TelemetrySessionParams struct {
+	Ctx                           context.Context
 	ContainerInstanceArn          string
 	CredentialProvider            *credentials.Credentials
 	Cfg                           *config.Config
 	DeregisterInstanceEventStream *eventstream.EventStream
-	ContainerChangeEventStream    *eventstream.EventStream
-	DockerClient                  engine.DockerClient
 	AcceptInvalidCert             bool
 	ECSClient                     api.ECSClient
 	TaskEngine                    engine.TaskEngine
+	StatsEngine                   *stats.DockerStatsEngine
 	_time                         ttime.Time
 	_timeOnce                     sync.Once
-}
-
-func (params *TelemetrySessionParams) isTelemetryDisabled() (bool, error) {
-	if params.Cfg != nil {
-		return params.Cfg.DisableMetrics, nil
-	}
-	return false, fmt.Errorf("Config is not initialized in session params")
 }
 
 func (params *TelemetrySessionParams) time() ttime.Time {

@@ -1,4 +1,4 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,9 +16,13 @@ package config
 import (
 	"time"
 
-	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
+	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 )
+
+// ImagePullBehaviorType is an enum variable type corresponding to different agent pull
+// behaviors including default, always, never and once.
+type ImagePullBehaviorType int8
 
 type Config struct {
 	// DEPRECATED
@@ -43,7 +47,7 @@ type Config struct {
 	// will be fatal.
 	AWSRegion string `missing:"fatal" trim:"true"`
 
-	// ReservedPorts is an array of ports which should be registerd as
+	// ReservedPorts is an array of ports which should be registered as
 	// unavailable. If not set, they default to [22,2375,2376,51678].
 	ReservedPorts []uint16
 	// ReservedPortsUDP is an array of UDP ports which should be registered as
@@ -63,7 +67,7 @@ type Config struct {
 	Checkpoint bool
 
 	// EngineAuthType configures what type of data is in EngineAuthData.
-	// Supported types, right now, can be found in the dockerauth package: https://godoc.org/github.com/aws/amazon-ecs-agent/agent/engine/dockerauth
+	// Supported types, right now, can be found in the dockerauth package: https://godoc.org/github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerauth
 	EngineAuthType string `trim:"true"`
 	// EngineAuthData contains authentication data. Please see the documentation
 	// for EngineAuthType for more information.
@@ -85,9 +89,12 @@ type Config struct {
 	// other than containers managed by ECS
 	ReservedMemory uint16
 
-	// DockerStopTimeout specifies the amount time before a SIGKILL is issued to
+	// DockerStopTimeout specifies the amount of time before a SIGKILL is issued to
 	// containers managed by ECS
 	DockerStopTimeout time.Duration
+
+	// ContainerStartTimeout specifies the amount of time to wait to start a container
+	ContainerStartTimeout time.Duration
 
 	// AvailableLoggingDrivers specifies the logging drivers available for use
 	// with Docker.  If not set, it defaults to ["json-file","none"].
@@ -146,6 +153,10 @@ type Config struct {
 	// when Agent performs cleanup
 	NumImagesToDeletePerCycle int
 
+	// ImagePullBehavior specifies the agent's behavior for pulling image and loading
+	// local Docker image cache
+	ImagePullBehavior ImagePullBehaviorType
+
 	// InstanceAttributes contains key/value pairs representing
 	// attributes to be associated with this instance within the
 	// ECS service and used to influence behavior such as launch
@@ -194,4 +205,17 @@ type Config struct {
 	// OverrideAWSLogsExecutionRole is config option used to enable awslogs
 	// driver authentication over the task's execution role
 	OverrideAWSLogsExecutionRole bool
+
+	// CgroupPath is the path expected by the agent, defaults to
+	// '/sys/fs/cgroup'
+	CgroupPath string
+
+	// PlatformVariables consists of configuration variables specific to linux/windows
+	PlatformVariables PlatformVariables
+
+	// TaskMetadataSteadyStateRate specifies the steady state throttle for the task metadata endpoint
+	TaskMetadataSteadyStateRate int
+
+	// TaskMetadataBurstRate specifies the burst rate throttle for the task metadata endpoint
+	TaskMetadataBurstRate int
 }

@@ -1,4 +1,6 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// +build unit
+
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,6 +17,7 @@ package tcshandler
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/url"
@@ -22,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"context"
 
 	"github.com/aws/amazon-ecs-agent/agent/api/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/config"
@@ -31,10 +36,10 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
 	wsmock "github.com/aws/amazon-ecs-agent/agent/wsclient/mock/utils"
 	"github.com/aws/aws-sdk-go/aws/credentials"
+	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/mock/gomock"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/context"
 )
 
 const (
@@ -48,14 +53,24 @@ const (
 
 type mockStatsEngine struct{}
 
+var testCreds = credentials.NewStaticCredentials("test-id", "test-secret", "test-token")
+
 var testCfg = &config.Config{
 	AcceptInsecureCert: true,
 	AWSRegion:          "us-east-1",
 }
 
-func (engine *mockStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
+func (*mockStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
 	req := createPublishMetricsRequest()
 	return req.Metadata, req.TaskMetrics, nil
+}
+
+func (*mockStatsEngine) ContainerDockerStats(taskARN string, id string) (*docker.Stats, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (*mockStatsEngine) GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error) {
+	return nil, nil, nil
 }
 
 func TestFormatURL(t *testing.T) {
@@ -106,7 +121,9 @@ func TestStartSession(t *testing.T) {
 
 	deregisterInstanceEventStream := eventstream.NewEventStream("Deregister_Instance", context.Background())
 	// Start a session with the test server.
-	go startSession(server.URL, testCfg, credentials.AnonymousCredentials, &mockStatsEngine{}, defaultHeartbeatTimeout, defaultHeartbeatJitter, testPublishMetricsInterval, deregisterInstanceEventStream)
+	go startSession(server.URL, testCfg, testCreds, &mockStatsEngine{},
+		defaultHeartbeatTimeout, defaultHeartbeatJitter,
+		testPublishMetricsInterval, deregisterInstanceEventStream)
 
 	// startSession internally starts publishing metrics from the mockStatsEngine object.
 	time.Sleep(testPublishMetricsInterval)
@@ -168,7 +185,9 @@ func TestSessionConnectionClosedByRemote(t *testing.T) {
 	defer cancel()
 
 	// Start a session with the test server.
-	err = startSession(server.URL, testCfg, credentials.AnonymousCredentials, &mockStatsEngine{}, defaultHeartbeatTimeout, defaultHeartbeatJitter, testPublishMetricsInterval, deregisterInstanceEventStream)
+	err = startSession(server.URL, testCfg, testCreds, &mockStatsEngine{},
+		defaultHeartbeatTimeout, defaultHeartbeatJitter,
+		testPublishMetricsInterval, deregisterInstanceEventStream)
 
 	if err == nil {
 		t.Error("Expected io.EOF on closed connection")
@@ -203,11 +222,14 @@ func TestConnectionInactiveTimeout(t *testing.T) {
 	deregisterInstanceEventStream.StartListening()
 	defer cancel()
 	// Start a session with the test server.
-	err = startSession(server.URL, testCfg, credentials.AnonymousCredentials, &mockStatsEngine{}, 50*time.Millisecond, 100*time.Millisecond, testPublishMetricsInterval, deregisterInstanceEventStream)
+	err = startSession(server.URL, testCfg, testCreds, &mockStatsEngine{},
+		50*time.Millisecond, 100*time.Millisecond,
+		testPublishMetricsInterval, deregisterInstanceEventStream)
 	// if we are not blocked here, then the test pass as it will reconnect in StartSession
 	assert.Error(t, err, "Close the connection should cause the tcs client return error")
 
-	assert.True(t, websocket.IsCloseError(<-serverErr, websocket.CloseAbnormalClosure), "Read from closed connection should produce an io.EOF error")
+	assert.True(t, websocket.IsCloseError(<-serverErr, websocket.CloseAbnormalClosure),
+		"Read from closed connection should produce an io.EOF error")
 
 	closeSocket(closeWS)
 }

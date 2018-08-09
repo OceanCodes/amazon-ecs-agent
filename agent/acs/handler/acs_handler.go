@@ -1,4 +1,4 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/net/context"
+	"context"
 
 	acsclient "github.com/aws/amazon-ecs-agent/agent/acs/client"
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
@@ -74,7 +74,7 @@ type Session interface {
 }
 
 // session encapsulates all arguments needed by the handler to connect to ACS
-// and to handle messages recieved by ACS. The Session.Start() method can be used
+// and to handle messages received by ACS. The Session.Start() method can be used
 // to start processing messages from ACS.
 type session struct {
 	containerInstanceARN            string
@@ -179,7 +179,7 @@ func NewSession(ctx context.Context,
 // If the instance is deregistered, Start() would emit an event to the
 // deregister-instance event stream and sets the connection backoff time to 1 hour.
 func (acsSession *session) Start() error {
-	// connectToACS channel is used to inidcate the intent to connect to ACS
+	// connectToACS channel is used to indicate the intent to connect to ACS
 	// It's processed by the select loop to connect to ACS
 	connectToACS := make(chan struct{})
 	// This is required to trigger the first connection to ACS. Subsequent
@@ -222,7 +222,7 @@ func (acsSession *session) Start() error {
 					// to reconnect to ACS
 					sendEmptyMessageOnChannel(connectToACS)
 				} else {
-					// Wait was interrupted. We expect the session to close as canelling
+					// Wait was interrupted. We expect the session to close as canceling
 					// the session context is the only way to end up here. Print a message
 					// to indicate the same
 					seelog.Info("Interrupted waiting for reconnect delay to elapse; Expect session to close")
@@ -322,8 +322,8 @@ func (acsSession *session) startACSSession(client wsclient.ClientServer) error {
 		utils.AddJitter(acsSession.heartbeatTimeout(), acsSession.heartbeatJitter()), func() {
 			// If we do not have an error connecting and remain connected for at
 			// least 1 or so minutes, reset the backoff. This prevents disconnect
-			// errors that only happen infrequently from damaging the
-			// reconnectability as significantly.
+			// errors that only happen infrequently from damaging the reconnect
+			// delay as significantly.
 			acsSession.backoff.Reset()
 		})
 	defer backoffResetTimer.Stop()
@@ -429,6 +429,7 @@ func newDisconnectionTimer(client wsclient.ClientServer, timeout time.Duration, 
 		if err := client.Close(); err != nil {
 			seelog.Warnf("Error disconnecting: %v", err)
 		}
+		seelog.Info("Disconnected from ACS")
 	})
 
 	return timer
@@ -444,7 +445,7 @@ func anyMessageHandler(timer ttime.Timer, client wsclient.ClientServer) func(int
 			seelog.Warnf("Unable to extend read deadline for ACS connection: %v", err)
 		}
 
-		// Reset hearbeat timer
+		// Reset heartbeat timer
 		timer.Reset(utils.AddJitter(heartbeatTimeout, heartbeatJitter))
 	}
 }
@@ -458,7 +459,7 @@ func isInactiveInstanceError(acsError error) bool {
 }
 
 // sendEmptyMessageOnChannel sends an empty message using a go-routine on the
-// sepcified channel
+// specified channel
 func sendEmptyMessageOnChannel(channel chan<- struct{}) {
 	go func() {
 		channel <- struct{}{}

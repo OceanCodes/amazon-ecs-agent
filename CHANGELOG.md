@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.20.1
+* Bug - Fixed a bug where the agent couldn't be upgraded if there are tasks that
+  use volumes in the task definition on the instance
+* Bug - Fixed a bug where volumes driver may not work with mountpoint
+
+## 1.20.0
+* Feature - Add support for Docker volume drivers, third party drivers are only supported on linux
+* Enhancement - Replace the empty container with Docker local volume
+* Enhancement - Deprecate support for Docker version older than 1.9.0 [#1477](https://github.com/aws/amazon-ecs-agent/pull/1477)
+* Bug - Fixed a bug where container marked as stopped comes back with a running status [#1446](https://github.com/aws/amazon-ecs-agent/pull/1446)
+
+## 1.19.1
+* Bug - Fixed a bug where responses of introspection API break backward compatibility [#1473](https://github.com/aws/amazon-ecs-agent/pull/1473)
+
+## 1.19.0
+* Feature - Private registry can be authenticated through task definition using AWS Secrets Manager [#1427](https://github.com/aws/amazon-ecs-agent/pull/1427)
+
+## 1.18.0
+* Feature - Configurable container image pull behavior [#1348](https://github.com/aws/amazon-ecs-agent/pull/1348)
+* Bug - Fixed a bug where Docker Version() API never returns by adding a timeout [#1363](https://github.com/aws/amazon-ecs-agent/pull/1363)
+* Bug - Fixed a bug where tasks could get stuck waiting for execution of CNI plugin [#1358](https://github.com/aws/amazon-ecs-agent/pull/1358)
+* Bug - Fixed a bug where task cleanup could be blocked due to incorrect sentstatus [#1383](https://github.com/aws/amazon-ecs-agent/pull/1383)
+
+## 1.17.3
+* Enhancement - Distinct startContainerTimeouts for windows/linux, introduce a new environment variable `ECS_CONTAINER_START_TIMEOUT` to make it configurable [#1321](https://github.com/aws/amazon-ecs-agent/pull/1321)
+* Enhancement - Add support for containers to inherit ENI private DNS hostnames for `awsvpc` tasks [#1278](https://github.com/aws/amazon-ecs-agent/pull/1278)
+* Enhancement - Expose task definition family and task definition revision in container metadata file [#1295](https://github.com/aws/amazon-ecs-agent/pull/1295)
+* Enhancement - Fail image pulls if there's inactivity during image pull progress [#1290](https://github.com/aws/amazon-ecs-agent/pull/1290)
+* Enhancement - Parallelize the container transition in the same task [#1305](https://github.com/aws/amazon-ecs-agent/pull/1306)
+* Bug - Fixed a bug where a stale websocket connection could linger [#1310](https://github.com/aws/amazon-ecs-agent/pull/1310)
+
+## 1.17.2
+* Enhancement - Update the `amazon-ecs-cni-plugins` to `2018.02.0` [#1272](https://github.com/aws/amazon-ecs-agent/pull/1272)
+* Enhancement - Add container port mapping and ENI information in introspection
+API [#1271](https://github.com/aws/amazon-ecs-agent/pull/1271)
+
+## 1.17.1
+* Bug - Fixed a bug that was causing a runtime panic by accessing negative
+  index in the health check log slice [#1239](https://github.com/aws/amazon-ecs-agent/pull/1239)
+* Bug - Workaround for an issue where CPU percent was set to 1 when CPU was not
+  set or set to zero(unbounded) in Windows [#1227](https://github.com/aws/amazon-ecs-agent/pull/1227)
+* Bug - Fixed a bug where steady state throttle limits for task metadata endpoints
+  were too low for applications [#1240](https://github.com/aws/amazon-ecs-agent/pull/1240)
+
+## 1.17.0
+* Feature - Support a HTTP endpoint for `awsvpc` tasks to query metadata
+* Feature - Support Docker health check
+* Bug - Fixed a bug where `-version` fails due to its dependency on docker
+  client [#1118](https://github.com/aws/amazon-ecs-agent/pull/1118)
+* Bug - Persist container exit code in agent state file
+  [#1125](https://github.com/aws/amazon-ecs-agent/pull/1125)
+* Bug - Fixed a bug where the agent could lose track of running containers when
+  Docker APIs timeout [#1217](https://github.com/aws/amazon-ecs-agent/pull/1217)
+* Bug - Task level memory.use_hierarchy was not being set and memory limits
+  were not being enforced [#1195](https://github.com/aws/amazon-ecs-agent/pull/1195)
+* Bug - Fixed a bug where CPU utilization wasn't correctly reported on Windows
+  [@bboerst](https://github.com/bboerst) [#1219](https://github.com/aws/amazon-ecs-agent/pull/1219)
+
+## 1.16.2
+* Bug - Fixed a bug where the ticker would submit empty container state change
+  transitions when a task is STOPPED. [#1178](https://github.com/aws/amazon-ecs-agent/pull/1178)
+
 ## 1.16.1
 * Bug - Fixed a bug where the agent could miss sending an ENI attachment to ECS
   because of address propagation delays. [#1148](https://github.com/aws/amazon-ecs-agent/pull/1148)
