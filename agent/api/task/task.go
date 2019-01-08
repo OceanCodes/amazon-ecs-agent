@@ -1297,6 +1297,14 @@ func (task *Task) dockerHostBinds(container *apicontainer.Container) ([]string, 
 		if mountPoint.ReadOnly {
 			bind += ":ro"
 		}
+		if len(mountPoint.BindPropagation) > 0 {
+			if mountPoint.ReadOnly {
+				bind += ","
+			} else {
+				bind += ":"
+			}
+			bind += mountPoint.BindPropagation
+		}
 		binds[i] = bind
 	}
 

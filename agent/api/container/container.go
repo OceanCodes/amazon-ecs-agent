@@ -242,9 +242,10 @@ type DockerContainer struct {
 // MountPoint describes the in-container location of a Volume and references
 // that Volume by name.
 type MountPoint struct {
-	SourceVolume  string `json:"sourceVolume"`
-	ContainerPath string `json:"containerPath"`
-	ReadOnly      bool   `json:"readOnly"`
+	SourceVolume    string `json:"sourceVolume"`
+	ContainerPath   string `json:"containerPath"`
+	ReadOnly        bool   `json:"readOnly"`
+	BindPropagation string `json:"bindPropagation,omitempty"`
 }
 
 // VolumeFrom is a volume which references another container as its source.
