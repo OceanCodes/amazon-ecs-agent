@@ -2,14 +2,11 @@ version: 2
 
 jobs:
   build:
-    docker:
-      - image: codeocean/build-golang:1.10
-
-    working_directory: /go/src/github.com/aws/amazon-ecs-agent
+    machine:
+      image: circleci/classic:201808-01
 
     steps:
       - checkout
 
-      #- run: make get-deps
-      #- run: make test
-      #- run: make static-check
+      - run: make -f Makefile.co image
+      - run: make -f Makefile.co push
