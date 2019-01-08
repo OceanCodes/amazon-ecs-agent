@@ -1929,6 +1929,9 @@ func (task *Task) dockerHostBinds(container *apicontainer.Container) ([]string, 
 		if mountPoint.ReadOnly {
 			bind += ":ro"
 		}
+		if mountPoint.ContainerPath == "/workspaces" {
+			bind += ":shared"
+		}
 		binds[i] = bind
 	}
 
