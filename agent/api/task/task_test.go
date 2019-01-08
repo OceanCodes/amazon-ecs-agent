@@ -30,29 +30,36 @@ import (
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/asm"
 	"github.com/aws/amazon-ecs-agent/agent/asm/factory/mocks"
-	mock_secretsmanageriface "github.com/aws/amazon-ecs-agent/agent/asm/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/asm/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/credentials/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
+	mock_ssm_factory "github.com/aws/amazon-ecs-agent/agent/ssm/factory/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/asmauth"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
-
+	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/aws/aws-sdk-go/service/secretsmanager"
 
+	"github.com/aws/amazon-ecs-agent/agent/taskresource/asmsecret"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource/ssmsecret"
 	"github.com/aws/aws-sdk-go/aws"
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/fsouza/go-dockerclient"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-const dockerIDPrefix = "dockerid-"
+const (
+	dockerIDPrefix    = "dockerid-"
+	secretKeyWest1    = "/test/secretName_us-west-2"
+	asmSecretKeyWest1 = "arn:aws:secretsmanager:us-west-2:11111:secret:/test/secretName_us-west-2"
+)
 
 var defaultDockerClientAPIVersion = dockerclient.Version_1_17
 
@@ -250,66 +257,58 @@ func TestDockerHostConfigPauseContainer(t *testing.T) {
 			ID: "eniID",
 		},
 		Containers: []*apicontainer.Container{
-			&apicontainer.Container{
+			{
 				Name: "c1",
 			},
-			&apicontainer.Container{
-				Name: emptyHostVolumeName,
-				Type: apicontainer.ContainerEmptyHostVolume,
-			},
-			&apicontainer.Container{
-				Name: PauseContainerName,
+			{
+				Name: NetworkPauseContainerName,
 				Type: apicontainer.ContainerCNIPause,
 			},
 		},
 	}
 
+	customContainer := testTask.Containers[0]
+	pauseContainer := testTask.Containers[1]
 	// Verify that the network mode is set to "container:<pause-container-docker-id>"
-	// for a non empty volume, non pause container
-	config, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	// for a non pause container
+	config, err := testTask.DockerHostConfig(customContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
 	assert.Nil(t, err)
-	assert.Equal(t, "container:"+dockerIDPrefix+PauseContainerName, config.NetworkMode)
-
-	// Verify that the network mode is not set to "none"  for the
-	// empty volume container
-	config, err = testTask.DockerHostConfig(testTask.Containers[1], dockerMap(testTask), defaultDockerClientAPIVersion)
-	assert.Nil(t, err)
-	assert.Equal(t, networkModeNone, config.NetworkMode)
+	assert.Equal(t, "container:"+dockerIDPrefix+NetworkPauseContainerName, config.NetworkMode)
 
 	// Verify that the network mode is set to "none" for the pause container
-	config, err = testTask.DockerHostConfig(testTask.Containers[2], dockerMap(testTask), defaultDockerClientAPIVersion)
+	config, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
 	assert.Nil(t, err)
 	assert.Equal(t, networkModeNone, config.NetworkMode)
 
-	// Verify that overridden DNS settings are set for the "pause" container
-	// and not set for non "pause" containers
+	// Verify that overridden DNS settings are set for the pause container
+	// and not set for non pause containers
 	testTask.ENI.DomainNameServers = []string{"169.254.169.253"}
 	testTask.ENI.DomainNameSearchList = []string{"us-west-2.compute.internal"}
 
 	// DNS overrides are only applied to the pause container. Verify that the non-pause
 	// container contains no overrides
-	config, err = testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	config, err = testTask.DockerHostConfig(customContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
 	assert.Nil(t, err)
 	assert.Equal(t, 0, len(config.DNS))
 	assert.Equal(t, 0, len(config.DNSSearch))
 
 	// Verify DNS settings are overridden for the pause container
-	config, err = testTask.DockerHostConfig(testTask.Containers[2], dockerMap(testTask), defaultDockerClientAPIVersion)
+	config, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"169.254.169.253"}, config.DNS)
 	assert.Equal(t, []string{"us-west-2.compute.internal"}, config.DNSSearch)
 
-	// Verify eni ExtraHosts  added to HostConfig for "pause" container
+	// Verify eni ExtraHosts  added to HostConfig for pause container
 	ipaddr := &apieni.ENIIPV4Address{Primary: true, Address: "10.0.1.1"}
 	testTask.ENI.IPV4Addresses = []*apieni.ENIIPV4Address{ipaddr}
 	testTask.ENI.PrivateDNSName = "eni.ip.region.compute.internal"
 
-	config, err = testTask.DockerHostConfig(testTask.Containers[2], dockerMap(testTask), defaultDockerClientAPIVersion)
+	config, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"eni.ip.region.compute.internal:10.0.1.1"}, config.ExtraHosts)
 
-	// Verify eni Hostname is added to DockerConfig for "pause" container
-	dockerconfig, dockerConfigErr := testTask.DockerConfig(testTask.Containers[2], defaultDockerClientAPIVersion)
+	// Verify eni Hostname is added to DockerConfig for pause container
+	dockerconfig, dockerConfigErr := testTask.DockerConfig(pauseContainer, defaultDockerClientAPIVersion)
 	assert.Nil(t, dockerConfigErr)
 	assert.Equal(t, "eni.ip.region.compute.internal", dockerconfig.Hostname)
 
@@ -581,7 +580,26 @@ func TestPostUnmarshalTaskWithDockerVolumes(t *testing.T) {
 	assert.Equal(t, DockerVolumeType, taskVol.Type)
 }
 
-func TestPostUnmarshalTaskWithEmptyVolumes(t *testing.T) {
+func TestInitializeContainersV3MetadataEndpoint(t *testing.T) {
+	task := Task{
+		Containers: []*apicontainer.Container{
+			{
+				Name:        "c1",
+				Environment: make(map[string]string),
+			},
+		},
+	}
+	container := task.Containers[0]
+
+	task.initializeContainersV3MetadataEndpoint(utils.NewStaticUUIDProvider("new-uuid"))
+
+	// Test if the v3 endpoint id is set and the endpoint is injected to env
+	assert.Equal(t, container.GetV3EndpointID(), "new-uuid")
+	assert.Equal(t, container.Environment[apicontainer.MetadataURIEnvironmentVariableName],
+		fmt.Sprintf(apicontainer.MetadataURIFormat, "new-uuid"))
+}
+
+func TestPostUnmarshalTaskWithLocalVolumes(t *testing.T) {
 	// Constants used here are defined in task_unix_test.go and task_windows_test.go
 	taskFromACS := ecsacs.Task{
 		Arn:           strptr("myArn"),
@@ -593,8 +611,8 @@ func TestPostUnmarshalTaskWithEmptyVolumes(t *testing.T) {
 				Name: strptr("myName1"),
 				MountPoints: []*ecsacs.MountPoint{
 					{
-						ContainerPath: strptr(emptyVolumeContainerPath1),
-						SourceVolume:  strptr(emptyVolumeName1),
+						ContainerPath: strptr("/path1/"),
+						SourceVolume:  strptr("localvol1"),
 					},
 				},
 			},
@@ -602,20 +620,20 @@ func TestPostUnmarshalTaskWithEmptyVolumes(t *testing.T) {
 				Name: strptr("myName2"),
 				MountPoints: []*ecsacs.MountPoint{
 					{
-						ContainerPath: strptr(emptyVolumeContainerPath2),
-						SourceVolume:  strptr(emptyVolumeName2),
+						ContainerPath: strptr("/path2/"),
+						SourceVolume:  strptr("localvol2"),
 					},
 				},
 			},
 		},
 		Volumes: []*ecsacs.Volume{
 			{
-				Name: strptr(emptyVolumeName1),
+				Name: strptr("localvol1"),
 				Type: strptr("host"),
 				Host: &ecsacs.HostVolumeProperties{},
 			},
 			{
-				Name: strptr(emptyVolumeName2),
+				Name: strptr("localvol2"),
 				Type: strptr("host"),
 				Host: &ecsacs.HostVolumeProperties{},
 			},
@@ -641,6 +659,221 @@ func TestPostUnmarshalTaskWithEmptyVolumes(t *testing.T) {
 		assert.Equal(t, 0, len(vol.VolumeConfig.Labels))
 	}
 
+}
+
+// Slice of structs for Table Driven testing for sharing PID and IPC resources
+var namespaceTests = []struct {
+	PIDMode         string
+	IPCMode         string
+	ShouldProvision bool
+}{
+	{"", "none", false},
+	{"", "", false},
+	{"host", "host", false},
+	{"task", "task", true},
+	{"host", "task", true},
+	{"task", "host", true},
+	{"", "task", true},
+	{"task", "none", true},
+	{"host", "none", false},
+	{"host", "", false},
+	{"", "host", false},
+}
+
+// Testing the Getter functions for IPCMode and PIDMode
+func TestGetPIDAndIPCFromTask(t *testing.T) {
+	for _, aTest := range namespaceTests {
+		testTask := &Task{
+			Containers: []*apicontainer.Container{
+				{
+					Name: "c1",
+				},
+				{
+					Name: "c2",
+				},
+			},
+			PIDMode: aTest.PIDMode,
+			IPCMode: aTest.IPCMode,
+		}
+		assert.Equal(t, aTest.PIDMode, testTask.getPIDMode())
+		assert.Equal(t, aTest.IPCMode, testTask.getIPCMode())
+	}
+}
+
+// Tests if NamespacePauseContainer was provisioned in PostUnmarshalTask
+func TestPostUnmarshalTaskWithPIDSharing(t *testing.T) {
+	for _, aTest := range namespaceTests {
+		testTaskFromACS := ecsacs.Task{
+			Arn:           strptr("myArn"),
+			DesiredStatus: strptr("RUNNING"),
+			Family:        strptr("myFamily"),
+			PidMode:       strptr(aTest.PIDMode),
+			IpcMode:       strptr(aTest.IPCMode),
+			Version:       strptr("1"),
+			Containers: []*ecsacs.Container{
+				{
+					Name: strptr("container1"),
+				},
+				{
+					Name: strptr("container2"),
+				},
+			},
+		}
+
+		seqNum := int64(42)
+		task, err := TaskFromACS(&testTaskFromACS, &ecsacs.PayloadMessage{SeqNum: &seqNum})
+		assert.Nil(t, err, "Should be able to handle acs task")
+		assert.Equal(t, aTest.PIDMode, task.getPIDMode())
+		assert.Equal(t, aTest.IPCMode, task.getIPCMode())
+		assert.Equal(t, 2, len(task.Containers)) // before PostUnmarshalTask
+		cfg := config.Config{}
+		task.PostUnmarshalTask(&cfg, nil, nil, nil, nil)
+		if aTest.ShouldProvision {
+			assert.Equal(t, 3, len(task.Containers), "Namespace Pause Container should be created.")
+		} else {
+			assert.Equal(t, 2, len(task.Containers), "Namespace Pause Container should NOT be created.")
+		}
+	}
+}
+
+func TestNamespaceProvisionDependencyAndHostConfig(t *testing.T) {
+	for _, aTest := range namespaceTests {
+		taskFromACS := ecsacs.Task{
+			Arn:           strptr("myArn"),
+			DesiredStatus: strptr("RUNNING"),
+			Family:        strptr("myFamily"),
+			PidMode:       strptr(aTest.PIDMode),
+			IpcMode:       strptr(aTest.IPCMode),
+			Version:       strptr("1"),
+			Containers: []*ecsacs.Container{
+				{
+					Name: strptr("container1"),
+				},
+				{
+					Name: strptr("container2"),
+				},
+			},
+		}
+		seqNum := int64(42)
+		task, err := TaskFromACS(&taskFromACS, &ecsacs.PayloadMessage{SeqNum: &seqNum})
+		assert.Nil(t, err, "Should be able to handle acs task")
+		assert.Equal(t, aTest.PIDMode, task.getPIDMode())
+		assert.Equal(t, aTest.IPCMode, task.getIPCMode())
+		assert.Equal(t, 2, len(task.Containers)) // before PostUnmarshalTask
+		cfg := config.Config{}
+		task.PostUnmarshalTask(&cfg, nil, nil, nil, nil)
+		if !aTest.ShouldProvision {
+			assert.Equal(t, 2, len(task.Containers), "Namespace Pause Container should NOT be created.")
+			docMaps := dockerMap(task)
+			for _, container := range task.Containers {
+				//configure HostConfig for each container
+				dockHostCfg, err := task.DockerHostConfig(container, docMaps, defaultDockerClientAPIVersion)
+				assert.Nil(t, err)
+				assert.Equal(t, task.IPCMode, dockHostCfg.IpcMode)
+				assert.Equal(t, task.PIDMode, dockHostCfg.PidMode)
+				switch aTest.IPCMode {
+				case "host":
+					assert.Equal(t, "host", dockHostCfg.IpcMode)
+				case "none":
+					assert.Equal(t, "none", dockHostCfg.IpcMode)
+				case "":
+					assert.Equal(t, "", dockHostCfg.IpcMode)
+				}
+				switch aTest.PIDMode {
+				case "host":
+					assert.Equal(t, "host", dockHostCfg.PidMode)
+				case "":
+					assert.Equal(t, "", dockHostCfg.PidMode)
+				}
+			}
+		} else {
+			assert.Equal(t, 3, len(task.Containers), "Namespace Pause Container should be created.")
+
+			namespacePause, ok := task.ContainerByName(NamespacePauseContainerName)
+			if !ok {
+				t.Fatal("Namespace Pause Container not found")
+			}
+
+			docMaps := dockerMap(task)
+			dockerName := docMaps[namespacePause.Name].DockerID
+
+			for _, container := range task.Containers {
+				//configure HostConfig for each container
+				dockHostCfg, err := task.DockerHostConfig(container, docMaps, defaultDockerClientAPIVersion)
+				assert.Nil(t, err)
+				if namespacePause == container {
+					// Expected behavior for IPCMode="task" is "shareable"
+					if aTest.IPCMode == "task" {
+						assert.Equal(t, "shareable", dockHostCfg.IpcMode)
+					} else {
+						assert.Equal(t, "", dockHostCfg.IpcMode)
+					}
+					// Expected behavior for any PIDMode is ""
+					assert.Equal(t, "", dockHostCfg.PidMode)
+				} else {
+					switch aTest.IPCMode {
+					case "task":
+						assert.Equal(t, "container:"+dockerName, dockHostCfg.IpcMode)
+					case "host":
+						assert.Equal(t, "host", dockHostCfg.IpcMode)
+					}
+
+					switch aTest.PIDMode {
+					case "task":
+						assert.Equal(t, "container:"+dockerName, dockHostCfg.PidMode)
+					case "host":
+						assert.Equal(t, "host", dockHostCfg.PidMode)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestAddNamespaceSharingProvisioningDependency(t *testing.T) {
+	for _, aTest := range namespaceTests {
+		testTask := &Task{
+			PIDMode: aTest.PIDMode,
+			IPCMode: aTest.IPCMode,
+			Containers: []*apicontainer.Container{
+				{
+					Name: "c1",
+					TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+				},
+				{
+					Name: "c2",
+					TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+				},
+			},
+		}
+		cfg := &config.Config{
+			PauseContainerImageName: "pause-container-image-name",
+			PauseContainerTag:       "pause-container-tag",
+		}
+		testTask.addNamespaceSharingProvisioningDependency(cfg)
+		if aTest.ShouldProvision {
+			pauseContainer, ok := testTask.ContainerByName(NamespacePauseContainerName)
+			require.True(t, ok, "Expected to find pause container")
+			assert.True(t, pauseContainer.Essential, "Pause Container should be essential")
+			assert.Equal(t, len(testTask.Containers), 3)
+			for _, cont := range testTask.Containers {
+				// Check if dependency to Pause container was set
+				if cont.Name == NamespacePauseContainerName {
+					continue
+				}
+				found := false
+				for _, contDep := range cont.TransitionDependenciesMap[apicontainerstatus.ContainerPulled].ContainerDependencies {
+					if contDep.ContainerName == NamespacePauseContainerName && contDep.SatisfiedStatus == apicontainerstatus.ContainerRunning {
+						found = true
+					}
+				}
+				assert.True(t, found, "Dependency should have been found")
+			}
+		} else {
+			assert.Equal(t, len(testTask.Containers), 2, "Pause Container should not have been added")
+		}
+
+	}
 }
 
 func TestTaskFromACS(t *testing.T) {
@@ -698,6 +931,14 @@ func TestTaskFromACS(t *testing.T) {
 					Config:     strptr("config json"),
 					HostConfig: strptr("hostconfig json"),
 					Version:    strptr("version string"),
+				},
+				Secrets: []*ecsacs.Secret{
+					{
+						Name:      strptr("secret"),
+						ValueFrom: strptr("/test/secret"),
+						Provider:  strptr("ssm"),
+						Region:    strptr("us-west-2"),
+					},
 				},
 			},
 		},
@@ -764,6 +1005,14 @@ func TestTaskFromACS(t *testing.T) {
 					Config:     strptr("config json"),
 					HostConfig: strptr("hostconfig json"),
 					Version:    strptr("version string"),
+				},
+				Secrets: []apicontainer.Secret{
+					{
+						Name:      "secret",
+						ValueFrom: "/test/secret",
+						Provider:  "ssm",
+						Region:    "us-west-2",
+					},
 				},
 				TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
 			},
@@ -870,15 +1119,15 @@ func TestTaskUpdateKnownStatusToPendingWithEssentialContainerStoppedWhenSteadySt
 	testTask := &Task{
 		KnownStatusUnsafe: apitaskstatus.TaskStatusNone,
 		Containers: []*apicontainer.Container{
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerCreated,
 				Essential:         true,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerStopped,
 				Essential:         true,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe:       apicontainerstatus.ContainerCreated,
 				Essential:               true,
 				SteadyStateStatusUnsafe: &resourcesProvisioned,
@@ -906,8 +1155,8 @@ func TestGetEarliestTaskStatusForContainersWhenKnownStatusIsNotSetForContainers(
 	testTask := &Task{
 		KnownStatusUnsafe: apitaskstatus.TaskStatusNone,
 		Containers: []*apicontainer.Container{
-			&apicontainer.Container{},
-			&apicontainer.Container{},
+			{},
+			{},
 		},
 	}
 	assert.Equal(t, testTask.getEarliestKnownTaskStatusForContainers(), apitaskstatus.TaskStatusNone)
@@ -917,10 +1166,10 @@ func TestGetEarliestTaskStatusForContainersWhenSteadyStateIsRunning(t *testing.T
 	testTask := &Task{
 		KnownStatusUnsafe: apitaskstatus.TaskStatusNone,
 		Containers: []*apicontainer.Container{
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerCreated,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerRunning,
 			},
 		},
@@ -940,13 +1189,13 @@ func TestGetEarliestTaskStatusForContainersWhenSteadyStateIsResourceProvisioned(
 	testTask := &Task{
 		KnownStatusUnsafe: apitaskstatus.TaskStatusNone,
 		Containers: []*apicontainer.Container{
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerCreated,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerRunning,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe:       apicontainerstatus.ContainerRunning,
 				SteadyStateStatusUnsafe: &resourcesProvisioned,
 			},
@@ -972,13 +1221,13 @@ func TestTaskUpdateKnownStatusChecksSteadyStateWhenSetToRunning(t *testing.T) {
 	testTask := &Task{
 		KnownStatusUnsafe: apitaskstatus.TaskStatusNone,
 		Containers: []*apicontainer.Container{
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerCreated,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerRunning,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerRunning,
 			},
 		},
@@ -1003,15 +1252,15 @@ func TestTaskUpdateKnownStatusChecksSteadyStateWhenSetToResourceProvisioned(t *t
 	testTask := &Task{
 		KnownStatusUnsafe: apitaskstatus.TaskStatusNone,
 		Containers: []*apicontainer.Container{
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerCreated,
 				Essential:         true,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe: apicontainerstatus.ContainerRunning,
 				Essential:         true,
 			},
-			&apicontainer.Container{
+			{
 				KnownStatusUnsafe:       apicontainerstatus.ContainerRunning,
 				Essential:               true,
 				SteadyStateStatusUnsafe: &resourcesProvisioned,
@@ -1120,8 +1369,8 @@ func TestTaskFromACSWithOverrides(t *testing.T) {
 				Name: strptr("myName1"),
 				MountPoints: []*ecsacs.MountPoint{
 					{
-						ContainerPath: strptr(emptyVolumeContainerPath1),
-						SourceVolume:  strptr(emptyVolumeName1),
+						ContainerPath: strptr("volumeContainerPath1"),
+						SourceVolume:  strptr("volumeName1"),
 					},
 				},
 				Overrides: strptr(`{"command": ["foo", "bar"]}`),
@@ -1131,8 +1380,8 @@ func TestTaskFromACSWithOverrides(t *testing.T) {
 				Command: []*string{strptr("command")},
 				MountPoints: []*ecsacs.MountPoint{
 					{
-						ContainerPath: strptr(emptyVolumeContainerPath2),
-						SourceVolume:  strptr(emptyVolumeName2),
+						ContainerPath: strptr("volumeContainerPath2"),
+						SourceVolume:  strptr("volumeName2"),
 					},
 				},
 			},
@@ -1487,7 +1736,7 @@ func TestMarshalUnmarshalTaskASMResource(t *testing.T) {
 
 func TestSetTerminalReason(t *testing.T) {
 
-	expectedTerminalReason := "failed to provison resource"
+	expectedTerminalReason := "Failed to provision resource"
 	overrideTerminalReason := "should not override terminal reason"
 
 	task := &Task{}
@@ -1644,7 +1893,6 @@ func TestPopulateASMAuthDataNoDockerAuthConfig(t *testing.T) {
 
 	credentialsManager := mock_credentials.NewMockManager(ctrl)
 	asmClientCreator := mock_factory.NewMockClientCreator(ctrl)
-	//mockASMClient := mock_secretsmanageriface.NewMockSecretsManagerAPI(ctrl)
 
 	// create asm auth resource
 	asmRes := asmauth.NewASMAuthResource(
@@ -1701,4 +1949,492 @@ func TestPostUnmarshalTaskASMDockerAuth(t *testing.T) {
 
 	err := task.PostUnmarshalTask(cfg, credentialsManager, resFields, nil, nil)
 	assert.NoError(t, err)
+}
+
+func TestPostUnmarshalTaskSecret(t *testing.T) {
+	secret := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret",
+		Region:    "us-west-2",
+		ValueFrom: "/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cfg := &config.Config{}
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	ssmClientCreator := mock_ssm_factory.NewMockSSMClientCreator(ctrl)
+
+	resFields := &taskresource.ResourceFields{
+		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
+			SSMClientCreator:   ssmClientCreator,
+			CredentialsManager: credentialsManager,
+		},
+	}
+
+	err := task.PostUnmarshalTask(cfg, credentialsManager, resFields, nil, nil)
+	assert.NoError(t, err)
+}
+
+func TestPostUnmarshalTaskASMSecret(t *testing.T) {
+	secret := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret",
+		Region:    "us-west-2",
+		ValueFrom: "/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cfg := &config.Config{}
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	asmClientCreator := mock_factory.NewMockClientCreator(ctrl)
+
+	resFields := &taskresource.ResourceFields{
+		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
+			ASMClientCreator:   asmClientCreator,
+			CredentialsManager: credentialsManager,
+		},
+	}
+
+	resourceDep := apicontainer.ResourceDependency{
+		Name:           asmsecret.ResourceName,
+		RequiredStatus: resourcestatus.ResourceStatus(asmsecret.ASMSecretCreated),
+	}
+
+	err := task.PostUnmarshalTask(cfg, credentialsManager, resFields, nil, nil)
+	assert.NoError(t, err)
+
+	assert.Equal(t, 1, len(task.ResourcesMapUnsafe))
+	assert.Equal(t, resourceDep, task.Containers[0].TransitionDependenciesMap[apicontainerstatus.ContainerCreated].ResourceDependencies[0])
+}
+
+func TestGetAllSSMSecretRequirements(t *testing.T) {
+	regionWest := "us-west-2"
+	regionEast := "us-east-1"
+
+	secret1 := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret1",
+		Region:    regionWest,
+		ValueFrom: "/test/secretName1",
+	}
+
+	secret2 := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret2",
+		Region:    regionWest,
+		ValueFrom: "/test/secretName2",
+	}
+
+	secret3 := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret3",
+		Region:    regionEast,
+		ValueFrom: "/test/secretName3",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret1, secret2, secret3},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	reqs := task.getAllSSMSecretRequirements()
+	assert.Equal(t, secret1, reqs[regionWest][0])
+	assert.Equal(t, 1, len(reqs[regionWest]))
+}
+
+func TestInitializeAndGetSSMSecretResource(t *testing.T) {
+	secret := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret",
+		Region:    "us-west-2",
+		ValueFrom: "/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	container1 := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container, container1},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	ssmClientCreator := mock_ssm_factory.NewMockSSMClientCreator(ctrl)
+
+	resFields := &taskresource.ResourceFields{
+		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
+			SSMClientCreator:   ssmClientCreator,
+			CredentialsManager: credentialsManager,
+		},
+	}
+
+	task.initializeSSMSecretResource(credentialsManager, resFields)
+
+	resourceDep := apicontainer.ResourceDependency{
+		Name:           ssmsecret.ResourceName,
+		RequiredStatus: resourcestatus.ResourceStatus(ssmsecret.SSMSecretCreated),
+	}
+
+	assert.Equal(t, resourceDep, task.Containers[0].TransitionDependenciesMap[apicontainerstatus.ContainerCreated].ResourceDependencies[0])
+	assert.Equal(t, 0, len(task.Containers[1].TransitionDependenciesMap))
+
+	_, ok := task.getSSMSecretsResource()
+	assert.True(t, ok)
+}
+
+func TestRequiresSSMSecret(t *testing.T) {
+	secret := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret",
+		Region:    "us-west-2",
+		ValueFrom: "/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	container1 := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container, container1},
+	}
+
+	assert.Equal(t, true, task.requiresSSMSecret())
+}
+
+func TestRequiresSSMSecretNoSecret(t *testing.T) {
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	container1 := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container, container1},
+	}
+
+	assert.Equal(t, false, task.requiresSSMSecret())
+}
+
+func TestRequiresASMSecret(t *testing.T) {
+	secret := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret",
+		Region:    "us-west-2",
+		ValueFrom: "/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	container1 := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container, container1},
+	}
+
+	assert.True(t, task.requiresASMSecret())
+}
+
+func TestRequiresASMSecretNoSecret(t *testing.T) {
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	container1 := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container, container1},
+	}
+
+	assert.False(t, task.requiresASMSecret())
+}
+
+func TestGetAllASMSecretRequirements(t *testing.T) {
+	regionWest := "us-west-2"
+	regionEast := "us-east-1"
+
+	secret1 := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret1",
+		Region:    regionWest,
+		ValueFrom: "/test/secretName1",
+	}
+
+	secret2 := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret2",
+		Region:    regionWest,
+		ValueFrom: "/test/secretName2",
+	}
+
+	secret3 := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret3",
+		Region:    regionEast,
+		ValueFrom: "/test/secretName3",
+	}
+
+	secret4 := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret4",
+		Region:    regionWest,
+		ValueFrom: "/test/secretName1",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret1, secret2, secret3, secret4},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	reqs := task.getAllASMSecretRequirements()
+	assert.Equal(t, secret1, reqs["/test/secretName1_us-west-2"])
+	assert.Equal(t, secret2, reqs["/test/secretName2_us-west-2"])
+	assert.Equal(t, 2, len(reqs))
+}
+
+func TestInitializeAndGetASMSecretResource(t *testing.T) {
+	secret := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret",
+		Region:    "us-west-2",
+		ValueFrom: "/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	container1 := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   nil,
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container, container1},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	asmClientCreator := mock_factory.NewMockClientCreator(ctrl)
+
+	resFields := &taskresource.ResourceFields{
+		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
+			ASMClientCreator:   asmClientCreator,
+			CredentialsManager: credentialsManager,
+		},
+	}
+
+	task.initializeASMSecretResource(credentialsManager, resFields)
+
+	resourceDep := apicontainer.ResourceDependency{
+		Name:           asmsecret.ResourceName,
+		RequiredStatus: resourcestatus.ResourceStatus(asmsecret.ASMSecretCreated),
+	}
+
+	assert.Equal(t, resourceDep, task.Containers[0].TransitionDependenciesMap[apicontainerstatus.ContainerCreated].ResourceDependencies[0])
+	assert.Equal(t, 0, len(task.Containers[1].TransitionDependenciesMap))
+
+	_, ok := task.getASMSecretsResource()
+	assert.True(t, ok)
+}
+
+func TestPopulateSecretsAsEnv(t *testing.T) {
+	secret1 := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret1",
+		Region:    "us-west-2",
+		Type:      "ENVIRONMENT_VARIABLE",
+		ValueFrom: "/test/secretName",
+	}
+
+	secret2 := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret2",
+		Region:    "us-west-2",
+		Type:      "ENVIRONMENT_VARIABLE",
+		ValueFrom: "arn:aws:secretsmanager:us-west-2:11111:secret:/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret1, secret2},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	ssmRes := &ssmsecret.SSMSecretResource{}
+	ssmRes.SetCachedSecretValue(secretKeyWest1, "secretValue1")
+
+	asmRes := &asmsecret.ASMSecretResource{}
+	asmRes.SetCachedSecretValue(asmSecretKeyWest1, "secretValue2")
+
+	task.AddResource(ssmsecret.ResourceName, ssmRes)
+	task.AddResource(asmsecret.ResourceName, asmRes)
+
+	task.PopulateSecretsAsEnv(container)
+	assert.Equal(t, "secretValue1", container.Environment["secret1"])
+	assert.Equal(t, "secretValue2", container.Environment["secret2"])
+}
+
+func TestPopulateSecretsAsEnvOnlySSM(t *testing.T) {
+	secret1 := apicontainer.Secret{
+		Provider:  "asm",
+		Name:      "secret1",
+		Region:    "us-west-2",
+		Type:      "MOUNT_POINT",
+		ValueFrom: "arn:aws:secretsmanager:us-west-2:11111:secret:/test/secretName",
+	}
+
+	secret2 := apicontainer.Secret{
+		Provider:  "ssm",
+		Name:      "secret2",
+		Region:    "us-west-2",
+		Type:      "ENVIRONMENT_VARIABLE",
+		ValueFrom: "/test/secretName",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		Image:                     "image:tag",
+		Secrets:                   []apicontainer.Secret{secret1, secret2},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "test",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	asmRes := &asmsecret.ASMSecretResource{}
+	asmRes.SetCachedSecretValue(asmSecretKeyWest1, "secretValue1")
+
+	ssmRes := &ssmsecret.SSMSecretResource{}
+	ssmRes.SetCachedSecretValue(secretKeyWest1, "secretValue2")
+
+	task.AddResource(ssmsecret.ResourceName, ssmRes)
+	task.AddResource(asmsecret.ResourceName, asmRes)
+
+	task.PopulateSecretsAsEnv(container)
+	assert.Equal(t, "secretValue2", container.Environment["secret2"])
+	assert.Equal(t, 1, len(container.Environment))
 }

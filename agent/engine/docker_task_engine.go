@@ -32,7 +32,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
-	"github.com/aws/amazon-ecs-agent/agent/emptyvolume"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dependencygraph"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
@@ -111,7 +110,6 @@ type DockerTaskEngine struct {
 	// The write mutex should be taken when adding and removing tasks from managedTasks.
 	tasksLock sync.RWMutex
 
-	enableConcurrentPull                bool
 	credentialsManager                  credentials.Manager
 	_time                               ttime.Time
 	_timeOnce                           sync.Once
@@ -153,8 +151,7 @@ func NewDockerTaskEngine(cfg *config.Config,
 
 		stateChangeEvents: make(chan statechange.Event),
 
-		enableConcurrentPull: false,
-		credentialsManager:   credentialsManager,
+		credentialsManager: credentialsManager,
 
 		containerChangeEventStream: containerChangeEventStream,
 		imageManager:               imageManager,
@@ -208,8 +205,6 @@ func (engine *DockerTaskEngine) Init(ctx context.Context) error {
 	engine.stopEngine = cancel
 
 	engine.ctx = derivedCtx
-	// Determine whether the engine can perform concurrent "docker pull" based on docker version
-	engine.enableConcurrentPull = engine.isParallelPullCompatible()
 
 	// Open the event stream before we sync state so that e.g. if a container
 	// goes from running to stopped after we sync with it as "running" we still
@@ -338,8 +333,12 @@ func updateContainerMetadata(metadata *dockerapi.DockerContainerMetadata, contai
 	}
 
 	// Update volume for empty volume container
-	if metadata.Volumes != nil && container.IsInternal() {
-		task.UpdateMountPoints(container, metadata.Volumes)
+	if metadata.Volumes != nil {
+		if container.IsInternal() {
+			task.UpdateMountPoints(container, metadata.Volumes)
+		} else {
+			container.SetVolumes(metadata.Volumes)
+		}
 	}
 
 	// Set Exitcode if it's not set
@@ -666,11 +665,6 @@ func (engine *DockerTaskEngine) pullContainer(task *apitask.Task, container *api
 	case apicontainer.ContainerCNIPause:
 		// ContainerCNIPause image are managed at startup
 		return dockerapi.DockerContainerMetadata{}
-	case apicontainer.ContainerEmptyHostVolume:
-		// ContainerEmptyHostVolume image is either local (must be imported) or remote (must be pulled)
-		if emptyvolume.LocalImage {
-			return engine.client.ImportLocalEmptyVolumeImage()
-		}
 	}
 
 	if engine.imagePullRequired(engine.cfg.ImagePullBehavior, container, task.Arn) {
@@ -680,12 +674,9 @@ func (engine *DockerTaskEngine) pullContainer(task *apitask.Task, container *api
 			task.SetPullStoppedAt(timestamp)
 		}()
 
-		if engine.enableConcurrentPull {
-			seelog.Infof("Task engine [%s]: pulling container %s concurrently", task.Arn, container.Name)
-			return engine.concurrentPull(task, container)
-		}
-		seelog.Infof("Task engine [%s]: pulling container %s serially", task.Arn, container.Name)
-		return engine.serialPull(task, container)
+		seelog.Infof("Task engine [%s]: pulling container %s concurrently", task.Arn, container.Name)
+		return engine.concurrentPull(task, container)
+
 	}
 
 	// No pull image is required, just update container reference and use cached image.
@@ -740,41 +731,20 @@ func (engine *DockerTaskEngine) concurrentPull(task *apitask.Task, container *ap
 
 	// Record the task pull_started_at timestamp
 	pullStart := engine.time().Now()
-	defer func(startTime time.Time) {
-		seelog.Infof("Task engine [%s]: Finished pulling container %s in %s",
-			task.Arn, container.Image, time.Since(startTime).String())
-	}(pullStart)
 	ok := task.SetPullStartedAt(pullStart)
 	if ok {
 		seelog.Infof("Task engine [%s]: Recording timestamp for starting image pulltime: %s",
 			task.Arn, pullStart)
 	}
-
-	return engine.pullAndUpdateContainerReference(task, container)
-}
-
-func (engine *DockerTaskEngine) serialPull(task *apitask.Task, container *apicontainer.Container) dockerapi.DockerContainerMetadata {
-	seelog.Debugf("Task engine [%s]: attempting to obtain ImagePullDeleteLock to pull image - %s",
-		task.Arn, container.Image)
-	ImagePullDeleteLock.Lock()
-	seelog.Debugf("Task engine [%s]: acquired ImagePullDeleteLock, start pulling image - %s",
-		task.Arn, container.Image)
-	defer seelog.Debugf("Task engine [%s]: released ImagePullDeleteLock after pulling image - %s",
-		task.Arn, container.Image)
-	defer ImagePullDeleteLock.Unlock()
-
-	pullStart := engine.time().Now()
-	defer func(startTime time.Time) {
-		seelog.Infof("Task engine [%s]: finished pulling image [%s] in %s",
-			task.Arn, container.Image, time.Since(startTime).String())
-	}(pullStart)
-	ok := task.SetPullStartedAt(pullStart)
-	if ok {
-		seelog.Infof("Task engine [%s]: recording timestamp for starting image pull: %s",
-			task.Arn, pullStart.String())
+	metadata := engine.pullAndUpdateContainerReference(task, container)
+	if metadata.Error == nil {
+		seelog.Infof("Task engine [%s]: Finished pulling container %s in %s",
+			task.Arn, container.Image, time.Since(pullStart).String())
+	} else {
+		seelog.Errorf("Task engine [%s]: Failed to pull container %s: %v",
+			task.Arn, container.Image, metadata.Error)
 	}
-
-	return engine.pullAndUpdateContainerReference(task, container)
+	return metadata
 }
 
 func (engine *DockerTaskEngine) pullAndUpdateContainerReference(task *apitask.Task, container *apicontainer.Container) dockerapi.DockerContainerMetadata {
@@ -882,6 +852,14 @@ func (engine *DockerTaskEngine) createContainer(task *apitask.Task, container *a
 
 	if container.AWSLogAuthExecutionRole() {
 		err := task.ApplyExecutionRoleLogsAuth(hostConfig, engine.credentialsManager)
+		if err != nil {
+			return dockerapi.DockerContainerMetadata{Error: apierrors.NamedError(err)}
+		}
+	}
+
+	// apply secrets to container.Environment
+	if container.HasSecretAsEnv() {
+		err := task.PopulateSecretsAsEnv(container)
 		if err != nil {
 			return dockerapi.DockerContainerMetadata{Error: apierrors.NamedError(err)}
 		}

@@ -14,7 +14,7 @@
 USERID=$(shell id -u)
 GO_EXECUTABLE=$(shell command -v go 2> /dev/null)
 
-.PHONY: all gobuild static docker release certs test clean netkitten test-registry run-functional-tests benchmark-test gogenerate run-integ-tests pause-container get-cni-sources cni-plugins test-artifacts
+.PHONY: all gobuild static docker release certs test clean netkitten test-registry namespace-tests run-functional-tests benchmark-test gogenerate run-integ-tests pause-container get-cni-sources cni-plugins test-artifacts
 
 all: docker
 
@@ -172,7 +172,7 @@ test-artifacts-linux: $(LINUX_ARTIFACTS_TARGETS)
 test-artifacts: test-artifacts-windows test-artifacts-linux
 
 # Run our 'test' registry needed for integ and functional tests
-test-registry: netkitten volumes-test squid awscli image-cleanup-test-images fluentd taskmetadata-validator
+test-registry: netkitten volumes-test namespace-tests pause-container squid awscli image-cleanup-test-images fluentd agent-introspection-validator taskmetadata-validator v3-task-endpoint-validator
 	@./scripts/setup-test-registry
 
 test-in-docker:
@@ -182,6 +182,19 @@ test-in-docker:
 
 run-functional-tests: testnnp test-registry ecr-execution-role-image telemetry-test-image
 	. ./scripts/shared_env && go test -tags functional -timeout=30m -v ./agent/functional_tests/...
+
+.PHONY: build-image-for-ecr ecr-execution-role-image-for-upload upload-images replicate-images
+
+build-image-for-ecr: netkitten volumes-test squid awscli image-cleanup-test-images fluentd taskmetadata-validator testnnp container-health-check-image telemetry-test-image ecr-execution-role-image-for-upload
+
+ecr-execution-role-image-for-upload:
+	$(MAKE) -C misc/ecr-execution-role-upload $(MFLAGS)
+
+upload-images: build-image-for-ecr
+	@./scripts/upload-images $(STANDARD_REGION) $(STANDARD_REPOSITORY)
+
+replicate-images: build-image-for-ecr
+	@./scripts/upload-images $(REPLICATE_REGION) $(REPLICATE_REPOSITORY)
 
 PAUSE_CONTAINER_IMAGE = "amazon/amazon-ecs-pause"
 PAUSE_CONTAINER_TAG = "0.1.0"
@@ -222,13 +235,13 @@ cni-plugins: get-cni-sources .out-stamp
 	@echo "Built amazon-ecs-cni-plugins successfully."
 
 run-integ-tests: test-registry gremlin container-health-check-image run-sudo-tests
-	. ./scripts/shared_env && go test -race -tags integration -timeout=7m -v ./agent/engine/... ./agent/stats/... ./agent/app/...
+	. ./scripts/shared_env && go test -race -tags integration -timeout=10m -v ./agent/engine/... ./agent/stats/... ./agent/app/...
 
 run-sudo-tests:
 	. ./scripts/shared_env && sudo -E ${GO_EXECUTABLE} test -race -tags sudo -timeout=1m -v ./agent/engine/...
 
 .PHONY: codebuild
-codebuild: get-deps test-artifacts .out-stamp
+codebuild: test-artifacts .out-stamp
 	$(MAKE) release TARGET_OS="linux"
 	TARGET_OS="linux" ./scripts/local-save
 	$(MAKE) docker-release TARGET_OS="windows"
@@ -240,9 +253,20 @@ netkitten:
 volumes-test:
 	$(MAKE) -C misc/volumes-test $(MFLAGS)
 
+namespace-tests:
+	@docker build -f scripts/dockerfiles/Dockerfile.buildNamespaceTests -t "amazon/amazon-ecs-namespace-tests:make" .
+	@docker run --net=none \
+		-u "$(USERID)" \
+		-v "$(PWD)/misc/namespace-tests:/out" \
+		-v "$(PWD)/misc/namespace-tests/buildContainer:/usr/src/buildContainer" \
+		"amazon/amazon-ecs-namespace-tests:make"
+
+	$(MAKE) -C misc/namespace-tests $(MFLAGS)
+	@docker rmi -f "amazon/amazon-ecs-namespace-tests:make"
+
 # TODO, replace this with a build on dockerhub or a mechanism for the
 # functional tests themselves to build this
-.PHONY: squid awscli fluentd gremlin taskmetadata-validator image-cleanup-test-images ecr-execution-role-image container-health-check-image telemetry-test-image
+.PHONY: squid awscli fluentd gremlin agent-introspection-validator taskmetadata-validator v3-task-endpoint-validator image-cleanup-test-images ecr-execution-role-image container-health-check-image telemetry-test-image
 squid:
 	$(MAKE) -C misc/squid $(MFLAGS)
 
@@ -261,8 +285,14 @@ testnnp:
 image-cleanup-test-images:
 	$(MAKE) -C misc/image-cleanup-test-images $(MFLAGS)
 
+agent-introspection-validator:
+	$(MAKE) -C misc/agent-introspection-validator $(MFLAGS)
+
 taskmetadata-validator:
 	$(MAKE) -C misc/taskmetadata-validator $(MFLAGS)
+
+v3-task-endpoint-validator:
+	$(MAKE) -C misc/v3-task-endpoint-validator $(MFLAGS)
 
 ecr-execution-role-image:
 	$(MAKE) -C misc/ecr $(MFLAGS)
@@ -300,7 +330,7 @@ ifeq (${PLATFORM},Linux)
 		dep_arch=darwin-386
 	endif
 
-DEP_VERSION=v0.4.1
+DEP_VERSION=v0.5.0
 .PHONY: get-dep
 get-dep: bin/dep
 
@@ -318,10 +348,13 @@ clean:
 	$(MAKE) -C $(ECS_CNI_REPOSITORY_SRC_DIR) clean
 	-$(MAKE) -C misc/netkitten $(MFLAGS) clean
 	-$(MAKE) -C misc/volumes-test $(MFLAGS) clean
+	-$(MAKE) -C misc/namespace-tests $(MFLAGS) clean
 	-$(MAKE) -C misc/gremlin $(MFLAGS) clean
 	-$(MAKE) -C misc/testnnp $(MFLAGS) clean
 	-$(MAKE) -C misc/image-cleanup-test-images $(MFLAGS) clean
+	-$(MAKE) -C misc/agent-introspection-validator $(MFLAGS) clean
 	-$(MAKE) -C misc/taskmetadata-validator $(MFLAGS) clean
+	-$(MAKE) -C misc/v3-task-endpoint-validator $(MFLAGS) clean
 	-$(MAKE) -C misc/container-health $(MFLAGS) clean
 	-$(MAKE) -C misc/telemetry $(MFLAGS) clean
 	-rm -f .get-deps-stamp

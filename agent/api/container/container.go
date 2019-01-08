@@ -47,6 +47,22 @@ const (
 
 	// AuthTypeASM is to use image pull auth over AWS Secrets Manager
 	AuthTypeASM = "asm"
+
+	// MetadataURIEnvironmentVariableName defines the name of the environment
+	// variable in containers' config, which can be used by the containers to access the
+	// v3 metadata endpoint
+	MetadataURIEnvironmentVariableName = "ECS_CONTAINER_METADATA_URI"
+	// MetadataURIFormat defines the URI format for v3 metadata endpoint
+	MetadataURIFormat = "http://169.254.170.2/v3/%s"
+
+	// SecretProviderSSM is to show secret provider being SSM
+	SecretProviderSSM = "ssm"
+
+	// SecretProviderASM is to show secret provider being ASM
+	SecretProviderASM = "asm"
+
+	// SecretTypeEnv is to show secret type being ENVIRONMENT_VARIABLE
+	SecretTypeEnv = "ENVIRONMENT_VARIABLE"
 )
 
 // DockerConfig represents additional metadata about a container to run. It's
@@ -77,6 +93,9 @@ type HealthStatus struct {
 type Container struct {
 	// Name is the name of the container specified in the task definition
 	Name string
+	// V3EndpointID is a container identifier used to construct v3 metadata endpoint; it's unique among
+	// all the containers managed by the agent
+	V3EndpointID string
 	// Image is the image name specified in the task definition
 	Image string
 	// ImageID is the local ID of the image used in the container
@@ -95,6 +114,8 @@ type Container struct {
 	MountPoints []MountPoint `json:"mountPoints"`
 	// Ports contains a list of ports binding configuration
 	Ports []PortBinding `json:"portMappings"`
+	// Secrets contains a list of secret
+	Secrets []Secret `json:"secrets"`
 	// Essential denotes whether the container is essential or not
 	Essential bool
 	// EntryPoint is entrypoint of the container, corresponding to docker option: --entrypoint
@@ -190,6 +211,9 @@ type Container struct {
 	// KnownPortBindingsUnsafe is an array of port bindings for the container.
 	KnownPortBindingsUnsafe []PortBinding `json:"KnownPortBindings"`
 
+	// VolumesUnsafe is an array of volume mounts in the container.
+	VolumesUnsafe []docker.Mount `json:"-"`
+
 	// SteadyStateStatusUnsafe specifies the steady state status for the container
 	// If uninitialized, it's assumed to be set to 'ContainerRunning'. Even though
 	// it's not only supposed to be set when the container is being created, it's
@@ -227,6 +251,22 @@ type MountPoint struct {
 type VolumeFrom struct {
 	SourceContainer string `json:"sourceContainer"`
 	ReadOnly        bool   `json:"readOnly"`
+}
+
+// Secret contains all essential attributes needed for ECS secrets vending as environment variables/tmpfs files
+type Secret struct {
+	Name          string `json:"name"`
+	ValueFrom     string `json:"valueFrom"`
+	Region        string `json:"region"`
+	ContainerPath string `json:"containerPath"`
+	Type          string `json:"type"`
+	Provider      string `json:"provider"`
+}
+
+// GetSecretResourceCacheKey returns the key required to access the secret
+// from the ssmsecret resource
+func (s *Secret) GetSecretResourceCacheKey() string {
+	return s.ValueFrom + "_" + s.Region
 }
 
 // String returns a human readable string representation of DockerContainer
@@ -398,8 +438,8 @@ func (c *Container) GetNextKnownStateProgression() apicontainerstatus.ContainerS
 	return c.GetKnownStatus() + 1
 }
 
-// IsInternal returns true if the container type is either `ContainerEmptyHostVolume`
-// or `ContainerCNIPause`. It returns false otherwise
+// IsInternal returns true if the container type is `ContainerCNIPause`
+// or `ContainerNamespacePause`. It returns false otherwise
 func (c *Container) IsInternal() bool {
 	if c.Type == ContainerNormal {
 		return false
@@ -535,6 +575,22 @@ func (c *Container) GetKnownPortBindings() []PortBinding {
 	return c.KnownPortBindingsUnsafe
 }
 
+// SetVolumes sets the volumes mounted in a container
+func (c *Container) SetVolumes(volumes []docker.Mount) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	c.VolumesUnsafe = volumes
+}
+
+// GetVolumes returns the volumes mounted in a container
+func (c *Container) GetVolumes() []docker.Mount {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.VolumesUnsafe
+}
+
 // HealthStatusShouldBeReported returns true if the health check is defined in
 // the task definition
 func (c *Container) HealthStatusShouldBeReported() bool {
@@ -664,4 +720,103 @@ func (c *Container) ShouldPullWithASMAuth() bool {
 // to the docker client to pull the image
 func (c *Container) SetASMDockerAuthConfig(dac docker.AuthConfiguration) {
 	c.RegistryAuthentication.ASMAuthData.SetDockerAuthConfig(dac)
+}
+
+// SetV3EndpointID sets the v3 endpoint id of container
+func (c *Container) SetV3EndpointID(v3EndpointID string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	c.V3EndpointID = v3EndpointID
+}
+
+// GetV3EndpointID returns the v3 endpoint id of container
+func (c *Container) GetV3EndpointID() string {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.V3EndpointID
+}
+
+// InjectV3MetadataEndpoint injects the v3 metadata endpoint as an environment variable for a container
+func (c *Container) InjectV3MetadataEndpoint() {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// don't assume that the environment variable map has been initialized by others
+	if c.Environment == nil {
+		c.Environment = make(map[string]string)
+	}
+
+	c.Environment[MetadataURIEnvironmentVariableName] =
+		fmt.Sprintf(MetadataURIFormat, c.V3EndpointID)
+}
+
+// ShouldCreateWithSSMSecret returns true if this container needs to get secret
+// value from SSM Parameter Store
+func (c *Container) ShouldCreateWithSSMSecret() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	// Secrets field will be nil if there is no secrets for container
+	if c.Secrets == nil {
+		return false
+	}
+
+	for _, secret := range c.Secrets {
+		if secret.Provider == SecretProviderSSM {
+			return true
+		}
+	}
+	return false
+}
+
+// ShouldCreateWithASMSecret returns true if this container needs to get secret
+// value from AWS Secrets Manager
+func (c *Container) ShouldCreateWithASMSecret() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	// Secrets field will be nil if there is no secrets for container
+	if c.Secrets == nil {
+		return false
+	}
+
+	for _, secret := range c.Secrets {
+		if secret.Provider == SecretProviderASM {
+			return true
+		}
+	}
+	return false
+}
+
+// MergeEnvironmentVariables appends additional envVarName:envVarValue pairs to
+// the the container's enviornment values structure
+func (c *Container) MergeEnvironmentVariables(envVars map[string]string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// don't assume that the environment variable map has been initialized by others
+	if c.Environment == nil {
+		c.Environment = make(map[string]string)
+	}
+	for k, v := range envVars {
+		c.Environment[k] = v
+	}
+}
+
+func (c *Container) HasSecretAsEnv() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	// Secrets field will be nil if there is no secrets for container
+	if c.Secrets == nil {
+		return false
+	}
+	for _, secret := range c.Secrets {
+		if secret.Type == SecretTypeEnv {
+			return true
+		}
+	}
+	return false
 }

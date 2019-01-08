@@ -35,6 +35,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go/service/secretsmanager"
+	"github.com/aws/aws-sdk-go/service/ssm"
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -409,7 +410,7 @@ func TestTaskIAMRolesDefaultNetworkMode(t *testing.T) {
 }
 
 func taskIAMRoles(networkMode string, agent *TestAgent, t *testing.T) {
-	RequireDockerVersion(t, ">=1.11.0") // TaskIamRole is available from agent 1.11.0
+	agent.RequireVersion(">=1.11.0") // TaskIamRole is available from agent 1.11.0
 	roleArn := os.Getenv("TASK_IAM_ROLE_ARN")
 	if utils.ZeroOrNil(roleArn) {
 		t.Logf("TASK_IAM_ROLE_ARN not set, will try to use the role attached to instance profile")
@@ -430,7 +431,7 @@ func taskIAMRoles(networkMode string, agent *TestAgent, t *testing.T) {
 	containerId, err := agent.ResolveTaskDockerID(task, "container-with-iamrole")
 	require.NoError(t, err, "Error resolving docker id for container in task")
 
-	// TaskIAMRoles enabled contaienr should have the ExtraEnvironment variable AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+	// TaskIAMRoles enabled container should have the ExtraEnvironment variable AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
 	containerMetaData, err := agent.DockerClient.InspectContainer(containerId)
 	require.NoError(t, err, "Could not inspect container for task")
 	iamRoleEnabled := false
@@ -444,7 +445,7 @@ func taskIAMRoles(networkMode string, agent *TestAgent, t *testing.T) {
 	}
 	if !iamRoleEnabled {
 		task.Stop()
-		t.Fatalf("Could not found AWS_CONTAINER_CREDENTIALS_RELATIVE_URI in the container environment variable")
+		t.Fatal("Could not found AWS_CONTAINER_CREDENTIALS_RELATIVE_URI in the container environment variable")
 	}
 
 	// Task will only run one command "aws ec2 describe-regions"
@@ -459,6 +460,18 @@ func taskIAMRoles(networkMode string, agent *TestAgent, t *testing.T) {
 	// Search the audit log to verify the credential request
 	err = SearchStrInDir(filepath.Join(agent.TestDir, "log"), "audit.log.", *task.TaskArn)
 	require.NoError(t, err, "Verify credential request failed")
+}
+
+func TestV3TaskEndpointAWSVPCNetworkMode(t *testing.T) {
+	testV3TaskEndpoint(t, "v3-task-endpoint-validator", "v3-task-endpoint-validator", "awsvpc", "ecs-functional-tests-v3-task-endpoint-validator")
+}
+
+func TestV3TaskEndpointBridgeNetworkMode(t *testing.T) {
+	testV3TaskEndpoint(t, "v3-task-endpoint-validator", "v3-task-endpoint-validator", "bridge", "ecs-functional-tests-v3-task-endpoint-validator")
+}
+
+func TestV3TaskEndpointHostNetworkMode(t *testing.T) {
+	testV3TaskEndpoint(t, "v3-task-endpoint-validator", "v3-task-endpoint-validator", "host", "ecs-functional-tests-v3-task-endpoint-validator")
 }
 
 // TestMemoryOvercommit tests the MemoryReservation of container can be configured in task definition
@@ -584,7 +597,7 @@ func fluentdDriverTest(taskDefinition string, t *testing.T) {
 	assert.NoError(t, err, "failed to find the log tag specified in the task definition")
 }
 
-// TestMetadataServiceValidator Tests that the metadata file can be accessed from the
+// TestMetadataServiceValidator tests that the metadata file can be accessed from the
 // container using the ECS_CONTAINER_METADATA_FILE environment variables
 func TestMetadataServiceValidator(t *testing.T) {
 	agentOptions := &AgentOptions{
@@ -609,6 +622,43 @@ func TestMetadataServiceValidator(t *testing.T) {
 	assert.Equal(t, 42, exitCode, fmt.Sprintf("Expected exit code of 42; got %d", exitCode))
 }
 
+// TestAgentIntrospectionValidator tests that the agent introspection endpoint can
+// be accessed from within the container.
+func TestAgentIntrospectionValidator(t *testing.T) {
+	// Best effort to create a log group. It should be safe to even not do this
+	// as the log group gets created in the TestAWSLogsDriver functional test.
+	cwlClient := cloudwatchlogs.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
+	cwlClient.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
+		LogGroupName: aws.String(awslogsLogGroupName),
+	})
+	agent := RunAgent(t, &AgentOptions{
+		EnableTaskENI: true,
+		ExtraEnvironment: map[string]string{
+			"ECS_AVAILABLE_LOGGING_DRIVERS": `["awslogs"]`,
+		},
+	})
+	defer agent.Cleanup()
+	agent.RequireVersion(">1.20.1")
+
+	tdOverrides := make(map[string]string)
+	tdOverrides["$$$TEST_REGION$$$"] = *ECS.Config.Region
+
+	task, err := agent.StartTaskWithTaskDefinitionOverrides(t, "agent-introspection-validator", tdOverrides)
+	require.NoError(t, err, "Unable to start task")
+	defer func() {
+		if err := task.Stop(); err != nil {
+			return
+		}
+		task.WaitStopped(waitTaskStateChangeDuration)
+	}()
+
+	err = task.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, err, "Error waiting for task to transition to STOPPED")
+	exitCode, _ := task.ContainerExitcode("agent-introspection-validator")
+
+	assert.Equal(t, 42, exitCode, fmt.Sprintf("Expected exit code of 42; got %d", exitCode))
+}
+
 func TestTaskMetadataValidator(t *testing.T) {
 	RequireDockerVersion(t, ">=17.06.0-ce")
 	// Best effort to create a log group. It should be safe to even not do this
@@ -624,7 +674,7 @@ func TestTaskMetadataValidator(t *testing.T) {
 		},
 	})
 	defer agent.Cleanup()
-	agent.RequireVersion(">1.16.2")
+	agent.RequireVersion(">1.20.1")
 
 	tdOverrides := make(map[string]string)
 	tdOverrides["$$$TEST_REGION$$$"] = *ECS.Config.Region
@@ -924,4 +974,261 @@ func TestTwoTasksSharedLocalVolume(t *testing.T) {
 	require.NoError(t, rErr, "Error waiting for task to transition to STOPPED")
 	rExitCode, _ := rTask.ContainerExitcode("task-shared-vol-read")
 	assert.Equal(t, 42, rExitCode, fmt.Sprintf("Expected exit code of 42; got %d", rExitCode))
+}
+
+// TestHostPIDNamespaceSharing tests the visibility of an executable running on one Task from
+// another Task. Both tasks share their PID namespace with Host. Second Task should see the
+// running executable.
+func TestHostPIDNamespaceSharing(t *testing.T) {
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	sTask, err := agent.StartTask(t, "pid-namespace-host-share")
+	require.NoError(t, err, "Register task definition failed")
+	sTask.WaitRunning(waitTaskStateChangeDuration)
+
+	rTask, err := agent.StartTask(t, "pid-namespace-host-read")
+	require.NoError(t, err, "Register task definition failed")
+	rErr := rTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, rErr, "Error waiting for task to transition to STOPPED")
+	rExitCode, _ := rTask.ContainerExitcode("pidConsumer")
+
+	sErr := sTask.Stop()
+	require.NoError(t, sErr, "Error stopping pid-namespace-host-share task")
+	sErr = sTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, sErr, "Error waiting for pid-namespace-host-share task to stop")
+	assert.Equal(t, 1, rExitCode, "Container could not see pidNamespaceTest process, but should")
+}
+
+// TestTaskPIDNamespaceSharing tests the visibility of an executable running on one Task from
+// another Task. Both tasks share their PID namespace within their respective Tasks. Second
+// Task should not see the running executable.
+func TestTaskPIDNamespaceSharing(t *testing.T) {
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	sTask, err := agent.StartTask(t, "pid-namespace-task-share")
+	require.NoError(t, err, "Register task definition failed")
+	sTask.WaitRunning(waitTaskStateChangeDuration)
+
+	rTask, err := agent.StartTask(t, "pid-namespace-task-read")
+	require.NoError(t, err, "Register task definition failed")
+	rErr := rTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, rErr, "Error waiting for task to transition to STOPPED")
+	rExitCode, _ := rTask.ContainerExitcode("pidConsumer")
+
+	sErr := sTask.Stop()
+	require.NoError(t, sErr, "Error stopping pid-namespace-task-share task")
+	sErr = sTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, sErr, "Error waiting for pid-namespace-task-share task to stop")
+	assert.Equal(t, 2, rExitCode, "Container could see pidNamespaceTest process, but shouldn't")
+}
+
+// TestHostIPCNamespaceSharing tests the visibility of an IPC semaphore created on one Task from
+// another Task. Both tasks share their IPC namespace with Host. Second Task should see the
+// created semaphore.
+func TestHostIPCNamespaceSharing(t *testing.T) {
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	sTask, err := agent.StartTask(t, "ipc-namespace-host-share")
+	require.NoError(t, err, "Register task definition failed")
+	sTask.WaitRunning(waitTaskStateChangeDuration)
+
+	rTask, err := agent.StartTask(t, "ipc-namespace-host-read")
+	require.NoError(t, err, "Register task definition failed")
+	rErr := rTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, rErr, "Error waiting for task to transition to STOPPED")
+	rExitCode, _ := rTask.ContainerExitcode("ipcConsumer")
+
+	sErr := sTask.Stop()
+	require.NoError(t, sErr, "Error stopping ipc-namespace-host-share task")
+	sErr = sTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, sErr, "Error waiting for ipc-namespace-host-share task to stop")
+	assert.Equal(t, 1, rExitCode, "Container could not see IPC resource, but should")
+}
+
+// TestTaskIPCNamespaceSharing tests the visibility of an IPC semaphore created on one Task from
+// another Task. Both tasks share their IPC namespace within their respective Tasks. Second
+// Task should not see the created semaphore.
+func TestTaskIPCNamespaceSharing(t *testing.T) {
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	sTask, err := agent.StartTask(t, "ipc-namespace-task-share")
+	require.NoError(t, err, "Register task definition failed")
+	sTask.WaitRunning(waitTaskStateChangeDuration)
+
+	rTask, err := agent.StartTask(t, "ipc-namespace-task-read")
+	require.NoError(t, err, "Register task definition failed")
+	rErr := rTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, rErr, "Error waiting for task to transition to STOPPED")
+	rExitCode, _ := rTask.ContainerExitcode("ipcConsumer")
+
+	sErr := sTask.Stop()
+	require.NoError(t, sErr, "Error stopping ipc-namespace-task-share task")
+	sErr = sTask.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, sErr, "Error waiting for ipc-namespace-task-share task to stop")
+	assert.Equal(t, 2, rExitCode, "Container could see IPC resource, but shouldn't")
+}
+
+// TestSSMSecretsNonEncryptedParameter tests the workflow for retrieving secrets from SSM Parameter Store,
+// here secret is a non encrypted parameter
+func TestSSMSecretsNonEncryptedParameterARN(t *testing.T) {
+
+	if os.Getenv("TEST_DISABLE_EXECUTION_ROLE") == "true" {
+		t.Skip("TEST_DISABLE_EXECUTION_ROLE was set to true")
+	}
+
+	executionRole := os.Getenv("ECS_FTS_EXECUTION_ROLE")
+	// execution role arn is following the pattern arn:aws:iam::accountId:role/***
+	executionRoleArr := strings.Split(executionRole, ":")
+	partition := executionRoleArr[1]
+	accountId := executionRoleArr[4]
+
+	parameterName := "FunctionalTest-SSMSecretsString"
+	secretName := "SECRET_NAME"
+	region := *ECS.Config.Region
+	ssmClient := ssm.New(session.New(), aws.NewConfig().WithRegion(region))
+	input := &ssm.PutParameterInput{
+		Description: aws.String("Resource created for the ECS Agent Functional Test: TestSSMSecretsNonEncryptedParameter"),
+		Name:        aws.String(parameterName),
+		Value:       aws.String("secretValue"),
+		Type:        aws.String("String"),
+	}
+
+	// create parameter in parameter store if it does not exist
+	_, err := ssmClient.PutParameter(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case ssm.ErrCodeParameterAlreadyExists:
+				t.Logf("Parameter %v already exists in SSM Parameter Store", parameterName)
+				break
+			default:
+				require.NoError(t, err, "SSM PutParameter call failed")
+			}
+		}
+	}
+
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	agent.RequireVersion(">=1.22.0")
+
+	tdOverrides := make(map[string]string)
+	tdOverrides["$$$SECRET_NAME$$$"] = secretName
+
+	arn := fmt.Sprintf("arn:%s:ssm:%s:%s:parameter/%s", partition, region, accountId, parameterName)
+	tdOverrides["$$$SSM_PARAMETER_NAME$$$"] = arn
+	tdOverrides["$$$EXECUTION_ROLE$$$"] = executionRole
+
+	task, err := agent.StartTaskWithTaskDefinitionOverrides(t, "ssmsecrets-environment-variables", tdOverrides)
+	require.NoError(t, err, "Failed to start task for ssmsecrets environment variables")
+
+	err = task.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, err)
+	exitCode, _ := task.ContainerExitcode("ssmsecrets-environment-variables")
+	assert.Equal(t, 42, exitCode, fmt.Sprintf("Expected exit code of 42; got %d", exitCode))
+}
+
+// TestSSMSecretsEncryptedParameter tests the workflow for retrieving secrets from SSM Parameter Store,
+// here secret is an encrypted parameter
+func TestSSMSecretsEncryptedParameter(t *testing.T) {
+
+	if os.Getenv("TEST_DISABLE_EXECUTION_ROLE") == "true" {
+		t.Skip("TEST_DISABLE_EXECUTION_ROLE was set to true")
+	}
+
+	parameterName := "FunctionalTest-SSMSecretsSecureString"
+	secretName := "SECRET_NAME"
+	ssmClient := ssm.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
+	input := &ssm.PutParameterInput{
+		Description: aws.String("Resource created for the ECS Agent Functional Test: TestSSMSecretsEncryptedParameter"),
+		Name:        aws.String(parameterName),
+		Value:       aws.String("secretValue"),
+		Type:        aws.String("SecureString"),
+	}
+
+	// create parameter in parameter store if it does not exist
+	_, err := ssmClient.PutParameter(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case ssm.ErrCodeParameterAlreadyExists:
+				t.Logf("Parameter %v already exists in SSM Parameter Store", parameterName)
+				break
+			default:
+				require.NoError(t, err, "SSM PutParameter call failed")
+			}
+		}
+	}
+
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	agent.RequireVersion(">=1.22.0")
+
+	tdOverrides := make(map[string]string)
+	tdOverrides["$$$SECRET_NAME$$$"] = secretName
+	tdOverrides["$$$SSM_PARAMETER_NAME$$$"] = parameterName
+	tdOverrides["$$$EXECUTION_ROLE$$$"] = os.Getenv("ECS_FTS_EXECUTION_ROLE")
+
+	task, err := agent.StartTaskWithTaskDefinitionOverrides(t, "ssmsecrets-environment-variables", tdOverrides)
+	require.NoError(t, err, "Failed to start task for ssmsecrets environment variables")
+
+	err = task.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, err)
+	exitCode, _ := task.ContainerExitcode("ssmsecrets-environment-variables")
+	assert.Equal(t, 42, exitCode, fmt.Sprintf("Expected exit code of 42; got %d", exitCode))
+}
+
+// TestSSMSecretsEncryptedASMSecrets tests the workflow for retrieving secrets from SSM Parameter Store,
+// here secret is a secret in secrets manager passing through parameter store
+func TestSSMSecretsEncryptedASMSecrets(t *testing.T) {
+
+	if os.Getenv("TEST_DISABLE_EXECUTION_ROLE") == "true" {
+		t.Skip("TEST_DISABLE_EXECUTION_ROLE was set to true")
+	}
+
+	parameterName := "/aws/reference/secretsmanager/FunctionalTest-SSMSecretsSecretFromASM"
+	secretName := "SECRET_NAME"
+	asmClient := secretsmanager.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
+	input := &secretsmanager.CreateSecretInput{
+		Description:  aws.String("Resource created for the ECS Agent Functional Test: TestSSMSecretsEncryptedASMSecrets"),
+		Name:         aws.String("FunctionalTest-SSMSecretsSecretFromASM"),
+		SecretString: aws.String("secretValue"),
+	}
+
+	// create parameter in parameter store if it does not exist
+	_, err := asmClient.CreateSecret(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case secretsmanager.ErrCodeResourceExistsException:
+				t.Logf("Secret FunctionalTest-SSMSecretsSecretFromASM already exists in AWS Secrets Manager")
+				break
+			default:
+				require.NoError(t, err, "Secrets Manager CreateSecret call failed")
+			}
+		}
+	}
+
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+
+	agent.RequireVersion(">=1.22.0")
+
+	tdOverrides := make(map[string]string)
+	tdOverrides["$$$SECRET_NAME$$$"] = secretName
+	tdOverrides["$$$SSM_PARAMETER_NAME$$$"] = parameterName
+	tdOverrides["$$$EXECUTION_ROLE$$$"] = os.Getenv("ECS_FTS_EXECUTION_ROLE")
+
+	task, err := agent.StartTaskWithTaskDefinitionOverrides(t, "ssmsecrets-environment-variables", tdOverrides)
+	require.NoError(t, err, "Failed to start task for ssmsecrets environment variables")
+
+	err = task.WaitStopped(waitTaskStateChangeDuration)
+	require.NoError(t, err)
+	exitCode, _ := task.ContainerExitcode("ssmsecrets-environment-variables")
+	assert.Equal(t, 42, exitCode, fmt.Sprintf("Expected exit code of 42; got %d", exitCode))
 }

@@ -40,6 +40,7 @@ type TaskResponse struct {
 	PullStartedAt      *time.Time          `json:"PullStartedAt,omitempty"`
 	PullStoppedAt      *time.Time          `json:"PullStoppedAt,omitempty"`
 	ExecutionStoppedAt *time.Time          `json:"ExecutionStoppedAt,omitempty"`
+	AvailabilityZone   string              `json:"AvailabilityZone,omitempty"`
 }
 
 // ContainerResponse defines the schema for the container response
@@ -62,6 +63,7 @@ type ContainerResponse struct {
 	Type          string                      `json:"Type"`
 	Networks      []containermetadata.Network `json:"Networks,omitempty"`
 	Health        *apicontainer.HealthStatus  `json:"Health,omitempty"`
+	Volumes       []v1.VolumeResponse         `json:"Volumes,omitempty"`
 }
 
 // LimitsResponse defines the schema for task/cpu limits response
@@ -74,19 +76,21 @@ type LimitsResponse struct {
 // NewTaskResponse creates a new response object for the task
 func NewTaskResponse(taskARN string,
 	state dockerstate.TaskEngineState,
-	cluster string) (*TaskResponse, error) {
+	cluster string,
+	az string) (*TaskResponse, error) {
 	task, ok := state.TaskByArn(taskARN)
 	if !ok {
 		return nil, errors.Errorf("v2 task response: unable to find task '%s'", taskARN)
 	}
 
 	resp := &TaskResponse{
-		Cluster:       cluster,
-		TaskARN:       task.Arn,
-		Family:        task.Family,
-		Revision:      task.Version,
-		DesiredStatus: task.GetDesiredStatus().String(),
-		KnownStatus:   task.GetKnownStatus().String(),
+		Cluster:          cluster,
+		TaskARN:          task.Arn,
+		Family:           task.Family,
+		Revision:         task.Version,
+		DesiredStatus:    task.GetDesiredStatus().String(),
+		KnownStatus:      task.GetKnownStatus().String(),
+		AvailabilityZone: az,
 	}
 
 	taskCPU := task.CPU
@@ -208,5 +212,6 @@ func newContainerResponse(dockerContainer *apicontainer.DockerContainer,
 		}
 	}
 
+	resp.Volumes = v1.NewVolumesResponse(dockerContainer)
 	return resp
 }

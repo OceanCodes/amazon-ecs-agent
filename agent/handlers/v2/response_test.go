@@ -28,22 +28,27 @@ import (
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate/mocks"
 	"github.com/aws/aws-sdk-go/aws"
+	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
 
 const (
-	taskARN        = "t1"
-	cluster        = "default"
-	family         = "sleep"
-	version        = "1"
-	containerID    = "cid"
-	containerName  = "sleepy"
-	imageName      = "busybox"
-	imageID        = "bUsYbOx"
-	cpu            = 1024
-	memory         = 512
-	eniIPv4Address = "10.0.0.2"
+	taskARN          = "t1"
+	cluster          = "default"
+	family           = "sleep"
+	version          = "1"
+	containerID      = "cid"
+	containerName    = "sleepy"
+	imageName        = "busybox"
+	imageID          = "bUsYbOx"
+	cpu              = 1024
+	memory           = 512
+	eniIPv4Address   = "10.0.0.2"
+	volName          = "volume1"
+	volSource        = "/var/lib/volume1"
+	volDestination   = "/volume"
+	availabilityZone = "us-west-2b"
 )
 
 func TestTaskResponse(t *testing.T) {
@@ -86,6 +91,13 @@ func TestTaskResponse(t *testing.T) {
 				Protocol:      apicontainer.TransportProtocolTCP,
 			},
 		},
+		VolumesUnsafe: []docker.Mount{
+			{
+				Name:        volName,
+				Source:      volSource,
+				Destination: volDestination,
+			},
+		},
 	}
 	created := time.Now()
 	container.SetCreatedAt(created)
@@ -94,7 +106,7 @@ func TestTaskResponse(t *testing.T) {
 	}
 	container.SetLabels(labels)
 	containerNameToDockerContainer := map[string]*apicontainer.DockerContainer{
-		taskARN: &apicontainer.DockerContainer{
+		taskARN: {
 			DockerID:   containerID,
 			DockerName: containerName,
 			Container:  container,
@@ -105,7 +117,7 @@ func TestTaskResponse(t *testing.T) {
 		state.EXPECT().ContainerMapByArn(taskARN).Return(containerNameToDockerContainer, true),
 	)
 
-	taskResponse, err := NewTaskResponse(taskARN, state, cluster)
+	taskResponse, err := NewTaskResponse(taskARN, state, cluster, availabilityZone)
 	assert.NoError(t, err)
 	_, err = json.Marshal(taskResponse)
 	assert.NoError(t, err)
@@ -154,6 +166,13 @@ func TestContainerResponse(t *testing.T) {
 						Protocol:      apicontainer.TransportProtocolTCP,
 					},
 				},
+				VolumesUnsafe: []docker.Mount{
+					{
+						Name:        volName,
+						Source:      volSource,
+						Destination: volDestination,
+					},
+				},
 			}
 			created := time.Now()
 			container.SetCreatedAt(created)
@@ -187,4 +206,205 @@ func TestContainerResponse(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestTaskResponseMarshal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	expectedTaskResponseMap := map[string]interface{}{
+		"Cluster":          cluster,
+		"TaskARN":          taskARN,
+		"Family":           family,
+		"Revision":         version,
+		"DesiredStatus":    "RUNNING",
+		"KnownStatus":      "RUNNING",
+		"AvailabilityZone": availabilityZone,
+		"Containers": []interface{}{
+			map[string]interface{}{
+				"DockerId":   containerID,
+				"Name":       containerName,
+				"DockerName": containerName,
+				"Image":      imageName,
+				"ImageID":    imageID,
+				"Ports": []interface{}{
+					map[string]interface{}{
+						"HostPort":      float64(80),
+						"ContainerPort": float64(80),
+						"Protocol":      "tcp",
+					},
+				},
+				"DesiredStatus": "NONE",
+				"KnownStatus":   "NONE",
+				"Limits": map[string]interface{}{
+					"CPU":    float64(0),
+					"Memory": float64(0),
+				},
+				"Type": "NORMAL",
+				"Networks": []interface{}{
+					map[string]interface{}{
+						"IPv4Addresses": []interface{}{
+							eniIPv4Address,
+						},
+						"NetworkMode": "awsvpc",
+					},
+				},
+			},
+		},
+	}
+
+	state := mock_dockerstate.NewMockTaskEngineState(ctrl)
+
+	task := &apitask.Task{
+		Arn:                 taskARN,
+		Family:              family,
+		Version:             version,
+		DesiredStatusUnsafe: apitaskstatus.TaskRunning,
+		KnownStatusUnsafe:   apitaskstatus.TaskRunning,
+		ENI: &apieni.ENI{
+			IPV4Addresses: []*apieni.ENIIPV4Address{
+				{
+					Address: eniIPv4Address,
+				},
+			},
+		},
+	}
+
+	container := &apicontainer.Container{
+		Name:         containerName,
+		V3EndpointID: "",
+		Image:        imageName,
+		ImageID:      imageID,
+		Ports: []apicontainer.PortBinding{
+			{
+				ContainerPort: 80,
+				Protocol:      apicontainer.TransportProtocolTCP,
+			},
+		},
+	}
+
+	containerNameToDockerContainer := map[string]*apicontainer.DockerContainer{
+		taskARN: {
+			DockerID:   containerID,
+			DockerName: containerName,
+			Container:  container,
+		},
+	}
+
+	gomock.InOrder(
+		state.EXPECT().TaskByArn(taskARN).Return(task, true),
+		state.EXPECT().ContainerMapByArn(taskARN).Return(containerNameToDockerContainer, true),
+	)
+
+	taskResponse, err := NewTaskResponse(taskARN, state, cluster, availabilityZone)
+	assert.NoError(t, err)
+
+	taskResponseJSON, err := json.Marshal(taskResponse)
+	assert.NoError(t, err)
+
+	taskResponseMap := make(map[string]interface{})
+	json.Unmarshal(taskResponseJSON, &taskResponseMap)
+	assert.Equal(t, expectedTaskResponseMap, taskResponseMap)
+}
+
+func TestContainerResponseMarshal(t *testing.T) {
+	timeRFC3339, _ := time.Parse(time.RFC3339, "2014-11-12T11:45:26Z")
+
+	expectedContainerResponseMap := map[string]interface{}{
+		"DockerId":   containerID,
+		"DockerName": containerName,
+		"Name":       containerName,
+		"Image":      imageName,
+		"ImageID":    imageID,
+		"Ports": []interface{}{
+			map[string]interface{}{
+				"ContainerPort": float64(80),
+				"Protocol":      "tcp",
+				"HostPort":      float64(80),
+			},
+		},
+		"Labels": map[string]interface{}{
+			"foo": "bar",
+		},
+		"DesiredStatus": "RUNNING",
+		"KnownStatus":   "RUNNING",
+		"Limits": map[string]interface{}{
+			"CPU":    float64(cpu),
+			"Memory": float64(memory),
+		},
+		"CreatedAt": timeRFC3339.Format(time.RFC3339),
+		"Type":      "NORMAL",
+		"Networks": []interface{}{
+			map[string]interface{}{
+				"NetworkMode": "awsvpc",
+				"IPv4Addresses": []interface{}{
+					eniIPv4Address,
+				},
+			},
+		},
+		"Health": map[string]interface{}{
+			"statusSince": timeRFC3339.Format(time.RFC3339),
+			"status":      "HEALTHY",
+		},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	state := mock_dockerstate.NewMockTaskEngineState(ctrl)
+	container := &apicontainer.Container{
+		Name:                containerName,
+		Image:               imageName,
+		ImageID:             imageID,
+		DesiredStatusUnsafe: apicontainerstatus.ContainerRunning,
+		KnownStatusUnsafe:   apicontainerstatus.ContainerRunning,
+		CPU:                 cpu,
+		Memory:              memory,
+		Type:                apicontainer.ContainerNormal,
+		HealthCheckType:     "docker",
+		Health: apicontainer.HealthStatus{
+			Status: apicontainerstatus.ContainerHealthy,
+			Since:  aws.Time(timeRFC3339),
+		},
+		Ports: []apicontainer.PortBinding{
+			{
+				ContainerPort: 80,
+				Protocol:      apicontainer.TransportProtocolTCP,
+			},
+		},
+	}
+
+	container.SetCreatedAt(timeRFC3339)
+	labels := map[string]string{
+		"foo": "bar",
+	}
+	container.SetLabels(labels)
+	dockerContainer := &apicontainer.DockerContainer{
+		DockerID:   containerID,
+		DockerName: containerName,
+		Container:  container,
+	}
+	task := &apitask.Task{
+		ENI: &apieni.ENI{
+			IPV4Addresses: []*apieni.ENIIPV4Address{
+				{
+					Address: eniIPv4Address,
+				},
+			},
+		},
+	}
+	gomock.InOrder(
+		state.EXPECT().ContainerByID(containerID).Return(dockerContainer, true),
+		state.EXPECT().TaskByID(containerID).Return(task, true),
+	)
+
+	containerResponse, err := NewContainerResponse(containerID, state)
+	assert.NoError(t, err)
+
+	containerResponseJSON, err := json.Marshal(containerResponse)
+	assert.NoError(t, err)
+
+	containerResponseMap := make(map[string]interface{})
+	json.Unmarshal(containerResponseJSON, &containerResponseMap)
+	assert.Equal(t, expectedContainerResponseMap, containerResponseMap)
 }

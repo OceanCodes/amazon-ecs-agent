@@ -34,18 +34,6 @@ import (
 )
 
 const (
-	emptyVolumeName1                  = "Empty-Volume-1"
-	emptyVolumeContainerPath1         = `C:\my\empty-volume-1`
-	expectedEmptyVolumeGeneratedPath1 = `c:\ecs-empty-volume\empty-volume-1`
-
-	emptyVolumeName2                  = "empty-volume-2"
-	emptyVolumeContainerPath2         = `C:\my\empty-volume-2`
-	expectedEmptyVolumeGeneratedPath2 = `c:\ecs-empty-volume\` + emptyVolumeName2
-
-	expectedEmptyVolumeContainerImage = "microsoft/nanoserver"
-	expectedEmptyVolumeContainerTag   = "latest"
-	expectedEmptyVolumeContainerCmd   = "not-applicable"
-
 	expectedMemorySwappinessDefault = memorySwappinessDefault
 	minDockerClientAPIVersion       = dockerclient.Version_1_24
 )
@@ -114,8 +102,23 @@ func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
 	cfg := config.Config{TaskCPUMemLimit: config.ExplicitlyDisabled}
 	task.PostUnmarshalTask(&cfg, nil, nil, nil, nil)
 
+	for _, container := range task.Containers { // remove v3 endpoint from each container because it's randomly generated
+		removeV3EndpointConfig(container)
+	}
 	assert.Equal(t, expectedTask.Containers, task.Containers, "Containers should be equal")
 	assert.Equal(t, expectedTask.Volumes, task.Volumes, "Volumes should be equal")
+}
+
+// removeV3EndpointConfig removes the v3 endpoint id and the injected env for a container
+// so that checking all other fields can be easier
+func removeV3EndpointConfig(container *apicontainer.Container) {
+	container.SetV3EndpointID("")
+	if container.Environment != nil {
+		delete(container.Environment, apicontainer.MetadataURIEnvironmentVariableName)
+	}
+	if len(container.Environment) == 0 {
+		container.Environment = nil
+	}
 }
 
 func TestWindowsPlatformHostConfigOverride(t *testing.T) {
@@ -296,8 +299,8 @@ func TestCPUPercentBasedOnUnboundedEnabled(t *testing.T) {
 						CPU:  uint(tc.cpu),
 					},
 				},
-				platformFields: platformFields{
-					cpuUnbounded: tc.cpuUnbounded,
+				PlatformFields: PlatformFields{
+					CpuUnbounded: tc.cpuUnbounded,
 				},
 			}
 
@@ -305,6 +308,32 @@ func TestCPUPercentBasedOnUnboundedEnabled(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Empty(t, hostconfig.CPUShares)
 			assert.Equal(t, tc.cpuPercent, hostconfig.CPUPercent)
+		})
+	}
+}
+
+func TestGetCanonicalPath(t *testing.T) {
+	testcases := []struct {
+		name           string
+		path           string
+		expectedResult string
+	}{
+		{
+			name:           "folderPath",
+			path:           `C:\myFile`,
+			expectedResult: `c:\myfile`,
+		},
+		{
+			name:           "drivePath",
+			path:           `D:`,
+			expectedResult: `d:`,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := getCanonicalPath(tc.path)
+			assert.Equal(t, result, tc.expectedResult)
 		})
 	}
 }

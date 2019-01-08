@@ -20,13 +20,15 @@
 #  name = "github.com/x/y"
 #  version = "2.4.0"
 
+required = ["github.com/golang/mock/mockgen/model"]
+
 [prune]
   go-tests = true
   unused-packages = true
 
 [[constraint]]
   name = "github.com/aws/aws-sdk-go"
-  version = "1.13.42"
+  version = "1.14.30"
 
 [[constraint]]
   name = "github.com/cihub/seelog"
@@ -54,7 +56,7 @@
 
 [[constraint]]
   name = "github.com/golang/mock"
-  revision ="58cd061d09382b6011f84c1291ebe50ef2e25bab"
+  version ="1.1.1"
 
 [[constraint]]
   name = "github.com/gorilla/websocket"
@@ -74,7 +76,7 @@
 
 [[constraint]]
   name = "github.com/stretchr/testify"
-  revision ="d77da356e56a7428ad25149ca77381849a6a5232"
+  revision ="f35b8ab0b5a2cef36673838d662e249dd9c94686"
 
 [[constraint]]
   name = "github.com/vishvananda/netlink"

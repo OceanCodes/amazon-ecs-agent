@@ -1,4 +1,4 @@
-// +build unit
+// +build linux,unit
 
 // Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
@@ -19,6 +19,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -157,13 +161,14 @@ func TestConstructENINetworkConfig(t *testing.T) {
 	ecscniClient := NewClient(&Config{})
 
 	config := &Config{
-		ENIID:                "eni-12345678",
-		ContainerID:          "containerid12",
-		ContainerPID:         "pid",
-		ENIIPV4Address:       "172.31.21.40",
-		ENIIPV6Address:       "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
-		ENIMACAddress:        "02:7b:64:49:b1:40",
-		BlockInstanceMetdata: true,
+		ENIID:                    "eni-12345678",
+		ContainerID:              "containerid12",
+		ContainerPID:             "pid",
+		ENIIPV4Address:           "172.31.21.40",
+		ENIIPV6Address:           "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+		ENIMACAddress:            "02:7b:64:49:b1:40",
+		BlockInstanceMetdata:     true,
+		SubnetGatewayIPV4Address: "172.31.1.1/20",
 	}
 
 	_, eniNetworkConfig, err := ecscniClient.(*cniClient).createENINetworkConfig(config)
@@ -177,6 +182,7 @@ func TestConstructENINetworkConfig(t *testing.T) {
 	assert.Equal(t, config.ENIIPV6Address, eniConfig.IPV6Address)
 	assert.Equal(t, config.ENIMACAddress, eniConfig.MACAddress)
 	assert.True(t, eniConfig.BlockInstanceMetdata)
+	assert.Equal(t, config.SubnetGatewayIPV4Address, eniConfig.SubnetGatewayIPV4Address)
 }
 
 // TestConstructBridgeNetworkConfigWithoutIPAM tests createBridgeNetworkConfigWithoutIPAM creates the right configuration for bridge plugin
@@ -256,4 +262,32 @@ func TestCNIPluginVersion(t *testing.T) {
 			assert.Equal(t, tc.str, tc.version.str())
 		})
 	}
+}
+
+// Asserts that CNI plugin version matches the expected version
+func TestCNIPluginVersionNumber(t *testing.T) {
+	versionStr := getCNIVersionString(t)
+	assert.Equal(t, currentCNIVersion, versionStr)
+}
+
+// Asserts that CNI plugin version is upgraded when new commits are made to CNI plugin submodule
+func TestCNIPluginVersionUpgrade(t *testing.T) {
+	versionStr := getCNIVersionString(t)
+	cmd := exec.Command("git", "submodule")
+	versionInfo, err := cmd.Output()
+	assert.NoError(t, err, "Error running the command: git submodule")
+	versionInfoStr := string(versionInfo)
+	// If a new commit is added, version should be upgraded
+	if currentCNIGitHash != strings.Split(versionInfoStr, " ")[1] {
+		assert.NotEqual(t, currentCNIVersion, versionStr)
+	}
+}
+
+// Returns the version in CNI plugin VERSION file as a string
+func getCNIVersionString(t *testing.T) string {
+	// ../../amazon-ecs-cni-plugins/VERSION
+	versionFilePath := filepath.Clean(filepath.Join("..", "..", "amazon-ecs-cni-plugins", "VERSION"))
+	versionStr, err := ioutil.ReadFile(versionFilePath)
+	assert.NoError(t, err, "Error reading the CNI plugin version file")
+	return strings.TrimSpace(string(versionStr))
 }
