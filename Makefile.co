@@ -11,6 +11,10 @@ image: release
 	docker tag amazon/amazon-ecs-agent:latest $(REGISTRY)/$(IMAGE_NAME):latest
 	if [ -n "$(TAG)" ]; then docker tag amazon/amazon-ecs-agent:latest $(REGISTRY)/$(IMAGE_NAME):$(TAG); fi
 
+.PHONY: image-branch
+image-branch: release
+	if [ -n "$(BRANCH)" ]; then docker tag amazon/amazon-ecs-agent:latest $(REGISTRY)/$(IMAGE_NAME):$(BRANCH); fi
+
 .PHONY: ecr-login
 ecr-login:
 	`aws ecr get-login --region us-east-1 --no-include-email`
@@ -21,3 +25,7 @@ push: ecr-login
 		docker push $(REGISTRY)/$(IMAGE_NAME):latest; \
 		docker push $(REGISTRY)/$(IMAGE_NAME):$(TAG); \
 	fi
+
+.PHONY: push-branch
+push-branch: ecr-login
+	if [ -n "$(BRANCH)" ]; then docker push $(REGISTRY)/$(IMAGE_NAME):$(BRANCH); fi

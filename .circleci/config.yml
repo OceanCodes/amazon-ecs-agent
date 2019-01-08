@@ -8,5 +8,20 @@ jobs:
     steps:
       - checkout
 
-      - run: make -f Makefile.co image
-      - run: make -f Makefile.co push
+      - run:
+          name: create docker image
+          command: |
+            if [ "${CIRCLE_BRANCH}" == "master" ]; then
+                make -f Makefile.co image
+            else
+                make -f Makefile.co image-branch
+            fi
+
+      - deploy:
+          name: push docker image
+          command: |
+            if [ "${CIRCLE_BRANCH}" == "master" ]; then
+                make -f Makefile.co push
+            else
+                make -f Makefile.co push-branch
+            fi
