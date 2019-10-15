@@ -1515,6 +1515,8 @@ func (task *Task) dockerHostConfig(container *apicontainer.Container, dockerCont
 		PortBindings: dockerPortMap,
 		VolumesFrom:  volumesFrom,
 		Resources:    resources,
+		OomScoreAdj:  -500,
+		UsernsMode:   "host",
 	}
 
 	if err := task.overrideContainerRuntime(container, hostConfig, cfg); err != nil {
