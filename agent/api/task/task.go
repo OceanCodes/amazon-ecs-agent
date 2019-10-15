@@ -971,7 +971,7 @@ func (task *Task) dockerHostConfig(container *apicontainer.Container, dockerCont
 		Binds:        binds,
 		PortBindings: dockerPortMap,
 		VolumesFrom:  volumesFrom,
-		OomScoreAdj:  500,
+		OomScoreAdj:  -500,
 		UsernsMode:   "host",
 	}
 
