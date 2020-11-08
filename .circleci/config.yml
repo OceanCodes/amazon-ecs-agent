@@ -2,8 +2,8 @@ version: 2.1
 
 jobs:
   build:
-    docker:
-      - image: codeocean/build-golang:1.13
+    machine:
+      image: circleci/classic:201808-01
 
     steps:
       - checkout
