@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -20,7 +20,10 @@ import (
 
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -38,13 +41,17 @@ func TestParseContainerCreate(t *testing.T) {
 	mockCluster := cluster
 	mockContainerInstanceARN := containerInstanceARN
 	mockAvailabilityZone := availabilityZone
+	mockHostPrivateIPv4Address := hostPrivateIPv4Address
+	mockHostPublicIPv4Address := hostPublicIPv4Address
 
 	expectedStatus := string(MetadataInitial)
 
 	newManager := &metadataManager{
-		cluster:              mockCluster,
-		containerInstanceARN: mockContainerInstanceARN,
-		availabilityZone:     mockAvailabilityZone,
+		cluster:                mockCluster,
+		containerInstanceARN:   mockContainerInstanceARN,
+		availabilityZone:       mockAvailabilityZone,
+		hostPrivateIPv4Address: mockHostPrivateIPv4Address,
+		hostPublicIPv4Address:  mockHostPublicIPv4Address,
 	}
 
 	metadata := newManager.parseMetadataAtContainerCreate(mockTask, mockContainerName)
@@ -53,6 +60,8 @@ func TestParseContainerCreate(t *testing.T) {
 	assert.Equal(t, metadata.taskMetadata.taskARN, mockTaskARN, "Expected task ARN "+mockTaskARN)
 	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
 	assert.Equal(t, metadata.availabilityZone, mockAvailabilityZone, "Expected availabilityZone "+mockAvailabilityZone)
+	assert.Equal(t, metadata.hostPrivateIPv4Address, mockHostPrivateIPv4Address, "Expected hostPrivateIPv4Address "+hostPrivateIPv4Address)
+	assert.Equal(t, metadata.hostPublicIPv4Address, mockHostPublicIPv4Address, "Expected hostPublicIPv4Address "+hostPublicIPv4Address)
 	assert.Equal(t, metadata.taskMetadata.taskDefinitionFamily, mockTaskDefinitionFamily, "Expected task definition family "+mockTaskDefinitionFamily)
 	assert.Equal(t, metadata.taskMetadata.taskDefinitionRevision, mockTaskDefinitionRevision, "Expected task definition revision "+mockTaskDefinitionRevision)
 	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
@@ -65,13 +74,17 @@ func TestParseHasNoContainer(t *testing.T) {
 	mockCluster := cluster
 	mockContainerInstanceARN := containerInstanceARN
 	mockAvailabilityZone := availabilityZone
+	mockHostPrivateIPv4Address := hostPrivateIPv4Address
+	mockHostPublicIPv4Address := hostPublicIPv4Address
 
 	expectedStatus := string(MetadataReady)
 
 	newManager := &metadataManager{
-		cluster:              mockCluster,
-		containerInstanceARN: mockContainerInstanceARN,
-		availabilityZone:     mockAvailabilityZone,
+		cluster:                mockCluster,
+		containerInstanceARN:   mockContainerInstanceARN,
+		availabilityZone:       mockAvailabilityZone,
+		hostPrivateIPv4Address: mockHostPrivateIPv4Address,
+		hostPublicIPv4Address:  mockHostPublicIPv4Address,
 	}
 
 	metadata := newManager.parseMetadata(nil, mockTask, mockContainerName)
@@ -80,6 +93,8 @@ func TestParseHasNoContainer(t *testing.T) {
 	assert.Equal(t, metadata.taskMetadata.taskARN, mockTaskARN, "Expected task ARN "+mockTaskARN)
 	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
 	assert.Equal(t, metadata.availabilityZone, mockAvailabilityZone, "Expected availabilityZone "+mockAvailabilityZone)
+	assert.Equal(t, metadata.hostPrivateIPv4Address, mockHostPrivateIPv4Address, "Expected hostPrivateIPv4Address "+hostPrivateIPv4Address)
+	assert.Equal(t, metadata.hostPublicIPv4Address, mockHostPublicIPv4Address, "Expected hostPublicIPv4Address "+hostPublicIPv4Address)
 	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
 	assert.Equal(t, metadata.dockerContainerMetadata.containerID, "", "Expected empty container metadata")
 	assert.Equal(t, metadata.dockerContainerMetadata.dockerContainerName, "", "Expected empty container metadata")
@@ -94,20 +109,27 @@ func TestParseHasConfig(t *testing.T) {
 	mockCluster := cluster
 	mockContainerInstanceARN := containerInstanceARN
 	mockAvailabilityZone := availabilityZone
+	mockHostPrivateIPv4Address := hostPrivateIPv4Address
+	mockHostPublicIPv4Address := hostPublicIPv4Address
 
-	mockConfig := &docker.Config{Image: "image"}
+	mockConfig := &dockercontainer.Config{Image: "image"}
 
-	mockNetworks := make(map[string]docker.ContainerNetwork)
-	mockNetworkSettings := &docker.NetworkSettings{Networks: mockNetworks}
+	mockNetworks := map[string]*network.EndpointSettings{}
+	mockNetworkSettings := &types.NetworkSettings{Networks: mockNetworks}
 
-	mockContainer := &docker.Container{Config: mockConfig, NetworkSettings: mockNetworkSettings}
+	mockContainer := &types.ContainerJSON{
+		Config:          mockConfig,
+		NetworkSettings: mockNetworkSettings,
+	}
 
 	expectedStatus := string(MetadataReady)
 
 	newManager := &metadataManager{
-		cluster:              mockCluster,
-		containerInstanceARN: mockContainerInstanceARN,
-		availabilityZone:     mockAvailabilityZone,
+		cluster:                mockCluster,
+		containerInstanceARN:   mockContainerInstanceARN,
+		availabilityZone:       mockAvailabilityZone,
+		hostPrivateIPv4Address: mockHostPrivateIPv4Address,
+		hostPublicIPv4Address:  mockHostPublicIPv4Address,
 	}
 
 	metadata := newManager.parseMetadata(mockContainer, mockTask, mockContainerName)
@@ -117,6 +139,8 @@ func TestParseHasConfig(t *testing.T) {
 	assert.Equal(t, metadata.taskMetadata.taskARN, mockTaskARN, "Expected task ARN "+mockTaskARN)
 	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
 	assert.Equal(t, metadata.availabilityZone, mockAvailabilityZone, "Expected availabilityZone "+mockAvailabilityZone)
+	assert.Equal(t, metadata.hostPrivateIPv4Address, mockHostPrivateIPv4Address, "Expected hostPrivateIPv4Address "+hostPrivateIPv4Address)
+	assert.Equal(t, metadata.hostPublicIPv4Address, mockHostPublicIPv4Address, "Expected hostPublicIPv4Address "+hostPublicIPv4Address)
 	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
 	assert.Equal(t, metadata.dockerContainerMetadata.imageName, "image", "Expected nonempty imageID")
 }
@@ -128,25 +152,39 @@ func TestParseHasNetworkSettingsPortBindings(t *testing.T) {
 	mockCluster := cluster
 	mockContainerInstanceARN := containerInstanceARN
 	mockAvailabilityZone := availabilityZone
+	mockHostPrivateIPv4Address := hostPrivateIPv4Address
+	mockHostPublicIPv4Address := hostPublicIPv4Address
 
-	mockPorts := make(map[docker.Port][]docker.PortBinding)
-	mockPortBinding := make([]docker.PortBinding, 0)
-	mockPortBinding = append(mockPortBinding, docker.PortBinding{HostIP: "0.0.0.0", HostPort: "8080"})
+	mockPorts := nat.PortMap{}
+	mockPortBinding := make([]nat.PortBinding, 0)
+	mockPortBinding = append(mockPortBinding, nat.PortBinding{HostIP: "0.0.0.0", HostPort: "8080"})
 	mockPorts["80/tcp"] = mockPortBinding
 
-	mockHostConfig := &docker.HostConfig{NetworkMode: "bridge"}
-	mockNetworks := make(map[string]docker.ContainerNetwork)
-	mockNetworks["bridge"] = docker.ContainerNetwork{}
-	mockNetworks["network0"] = docker.ContainerNetwork{}
-	mockNetworkSettings := &docker.NetworkSettings{Networks: mockNetworks, Ports: mockPorts}
-	mockContainer := &docker.Container{HostConfig: mockHostConfig, NetworkSettings: mockNetworkSettings}
+	mockHostConfig := &dockercontainer.HostConfig{NetworkMode: "bridge"}
+	mockNetworks := map[string]*network.EndpointSettings{}
+	mockNetworks["bridge"] = &network.EndpointSettings{}
+	mockNetworks["network0"] = &network.EndpointSettings{}
+	mockNetworkSettings := &types.NetworkSettings{
+		NetworkSettingsBase: types.NetworkSettingsBase{
+			Ports: mockPorts,
+		},
+		Networks: mockNetworks,
+	}
+	mockContainer := &types.ContainerJSON{
+		ContainerJSONBase: &types.ContainerJSONBase{
+			HostConfig: mockHostConfig,
+		},
+		NetworkSettings: mockNetworkSettings,
+	}
 
 	expectedStatus := string(MetadataReady)
 
 	newManager := &metadataManager{
-		cluster:              mockCluster,
-		containerInstanceARN: mockContainerInstanceARN,
-		availabilityZone:     mockAvailabilityZone,
+		cluster:                mockCluster,
+		containerInstanceARN:   mockContainerInstanceARN,
+		availabilityZone:       mockAvailabilityZone,
+		hostPrivateIPv4Address: mockHostPrivateIPv4Address,
+		hostPublicIPv4Address:  mockHostPublicIPv4Address,
 	}
 
 	metadata := newManager.parseMetadata(mockContainer, mockTask, mockContainerName)
@@ -155,6 +193,8 @@ func TestParseHasNetworkSettingsPortBindings(t *testing.T) {
 	assert.Equal(t, metadata.taskMetadata.taskARN, mockTaskARN, "Expected task ARN "+mockTaskARN)
 	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
 	assert.Equal(t, metadata.availabilityZone, mockAvailabilityZone, "Expected availabilityZone "+mockAvailabilityZone)
+	assert.Equal(t, metadata.hostPrivateIPv4Address, mockHostPrivateIPv4Address, "Expected hostPrivateIPv4Address "+hostPrivateIPv4Address)
+	assert.Equal(t, metadata.hostPublicIPv4Address, mockHostPublicIPv4Address, "Expected hostPublicIPv4Address "+hostPublicIPv4Address)
 	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
 	assert.Equal(t, len(metadata.dockerContainerMetadata.networkInfo.networks), 2, "Expected two networks")
 
@@ -171,17 +211,29 @@ func TestParseHasNetworkSettingsNetworksEmpty(t *testing.T) {
 	mockCluster := cluster
 	mockContainerInstanceARN := containerInstanceARN
 	mockAvailabilityZone := availabilityZone
+	mockHostPrivateIPv4Address := hostPrivateIPv4Address
+	mockHostPublicIPv4Address := hostPublicIPv4Address
 
-	mockHostConfig := &docker.HostConfig{NetworkMode: "bridge"}
-	mockNetworkSettings := &docker.NetworkSettings{IPAddress: "0.0.0.0"}
-	mockContainer := &docker.Container{HostConfig: mockHostConfig, NetworkSettings: mockNetworkSettings}
+	mockHostConfig := &dockercontainer.HostConfig{NetworkMode: "bridge"}
+	mockNetworkSettings := &types.NetworkSettings{
+		DefaultNetworkSettings: types.DefaultNetworkSettings{
+			IPAddress: "0.0.0.0",
+		}}
+	mockContainer := &types.ContainerJSON{
+		ContainerJSONBase: &types.ContainerJSONBase{
+			HostConfig: mockHostConfig,
+		},
+		NetworkSettings: mockNetworkSettings,
+	}
 
 	expectedStatus := string(MetadataReady)
 
 	newManager := &metadataManager{
-		cluster:              mockCluster,
-		containerInstanceARN: mockContainerInstanceARN,
-		availabilityZone:     mockAvailabilityZone,
+		cluster:                mockCluster,
+		containerInstanceARN:   mockContainerInstanceARN,
+		availabilityZone:       mockAvailabilityZone,
+		hostPrivateIPv4Address: mockHostPrivateIPv4Address,
+		hostPublicIPv4Address:  mockHostPublicIPv4Address,
 	}
 
 	metadata := newManager.parseMetadata(mockContainer, mockTask, mockContainerName)
@@ -190,6 +242,8 @@ func TestParseHasNetworkSettingsNetworksEmpty(t *testing.T) {
 	assert.Equal(t, metadata.taskMetadata.taskARN, mockTaskARN, "Expected task ARN "+mockTaskARN)
 	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
 	assert.Equal(t, metadata.availabilityZone, mockAvailabilityZone, "Expected availabilityZone "+mockAvailabilityZone)
+	assert.Equal(t, metadata.hostPrivateIPv4Address, mockHostPrivateIPv4Address, "Expected hostPrivateIPv4Address "+hostPrivateIPv4Address)
+	assert.Equal(t, metadata.hostPublicIPv4Address, mockHostPublicIPv4Address, "Expected hostPublicIPv4Address "+hostPublicIPv4Address)
 	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
 	assert.Equal(t, len(metadata.dockerContainerMetadata.networkInfo.networks), 1, "Expected one network")
 }
@@ -201,20 +255,31 @@ func TestParseHasNetworkSettingsNetworksNonEmpty(t *testing.T) {
 	mockCluster := cluster
 	mockContainerInstanceARN := containerInstanceARN
 	mockAvailabilityZone := availabilityZone
+	mockHostPrivateIPv4Address := hostPrivateIPv4Address
+	mockHostPublicIPv4Address := hostPublicIPv4Address
 
-	mockHostConfig := &docker.HostConfig{NetworkMode: "bridge"}
-	mockNetworks := make(map[string]docker.ContainerNetwork)
-	mockNetworks["bridge"] = docker.ContainerNetwork{}
-	mockNetworks["network0"] = docker.ContainerNetwork{}
-	mockNetworkSettings := &docker.NetworkSettings{Networks: mockNetworks}
-	mockContainer := &docker.Container{HostConfig: mockHostConfig, NetworkSettings: mockNetworkSettings}
+	mockHostConfig := &dockercontainer.HostConfig{NetworkMode: dockercontainer.NetworkMode("bridge")}
+	mockNetworks := map[string]*network.EndpointSettings{}
+	mockNetworks["bridge"] = &network.EndpointSettings{}
+	mockNetworks["network0"] = &network.EndpointSettings{}
+	mockNetworkSettings := &types.NetworkSettings{
+		Networks: mockNetworks,
+	}
+	mockContainer := &types.ContainerJSON{
+		ContainerJSONBase: &types.ContainerJSONBase{
+			HostConfig: mockHostConfig,
+		},
+		NetworkSettings: mockNetworkSettings,
+	}
 
 	expectedStatus := string(MetadataReady)
 
 	newManager := &metadataManager{
-		cluster:              mockCluster,
-		containerInstanceARN: mockContainerInstanceARN,
-		availabilityZone:     mockAvailabilityZone,
+		cluster:                mockCluster,
+		containerInstanceARN:   mockContainerInstanceARN,
+		availabilityZone:       mockAvailabilityZone,
+		hostPrivateIPv4Address: mockHostPrivateIPv4Address,
+		hostPublicIPv4Address:  mockHostPublicIPv4Address,
 	}
 
 	metadata := newManager.parseMetadata(mockContainer, mockTask, mockContainerName)
@@ -223,8 +288,44 @@ func TestParseHasNetworkSettingsNetworksNonEmpty(t *testing.T) {
 	assert.Equal(t, metadata.taskMetadata.taskARN, mockTaskARN, "Expected task ARN "+mockTaskARN)
 	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
 	assert.Equal(t, metadata.availabilityZone, mockAvailabilityZone, "Expected AvailabilityZone"+mockAvailabilityZone)
+	assert.Equal(t, metadata.hostPrivateIPv4Address, mockHostPrivateIPv4Address, "Expected hostPrivateIPv4Address "+hostPrivateIPv4Address)
+	assert.Equal(t, metadata.hostPublicIPv4Address, mockHostPublicIPv4Address, "Expected hostPublicIPv4Address "+hostPublicIPv4Address)
 	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
 	assert.Equal(t, len(metadata.dockerContainerMetadata.networkInfo.networks), 2, "Expected two networks")
+}
+
+func TestParseHasNoContainerJSONBase(t *testing.T) {
+	mockTaskARN := validTaskARN
+	mockTask := &apitask.Task{Arn: mockTaskARN}
+	mockContainerName := containerName
+	mockCluster := cluster
+	mockContainerInstanceARN := containerInstanceARN
+
+	mockConfig := &dockercontainer.Config{Image: "image"}
+	mockNetworkSettings := &types.NetworkSettings{
+		DefaultNetworkSettings: types.DefaultNetworkSettings{
+			IPAddress: "0.0.0.0",
+		}}
+	mockContainer := &types.ContainerJSON{
+		NetworkSettings: mockNetworkSettings,
+		Config:          mockConfig,
+	}
+
+	expectedStatus := string(MetadataReady)
+
+	newManager := &metadataManager{
+		cluster:              mockCluster,
+		containerInstanceARN: mockContainerInstanceARN,
+	}
+
+	metadata := newManager.parseMetadata(mockContainer, mockTask, mockContainerName)
+	assert.Equal(t, metadata.cluster, mockCluster, "Expected cluster "+mockCluster)
+	assert.Equal(t, metadata.taskMetadata.containerName, mockContainerName, "Expected container name "+mockContainerName)
+	assert.Equal(t, metadata.taskMetadata.taskARN, mockTaskARN, "Expected task ARN "+mockTaskARN)
+	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
+	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
+	assert.Equal(t, len(metadata.dockerContainerMetadata.networkInfo.networks), 0, "Expected one network")
+	assert.Equal(t, metadata.dockerContainerMetadata.imageName, "image")
 }
 
 func TestParseTaskDefinitionSettings(t *testing.T) {
@@ -234,18 +335,32 @@ func TestParseTaskDefinitionSettings(t *testing.T) {
 	mockCluster := cluster
 	mockContainerInstanceARN := containerInstanceARN
 	mockAvailabilityZone := availabilityZone
+	mockHostPrivateIPv4Address := hostPrivateIPv4Address
+	mockHostPublicIPv4Address := hostPublicIPv4Address
 
-	mockHostConfig := &docker.HostConfig{NetworkMode: "bridge"}
-	mockConfig := &docker.Config{Image: "image"}
-	mockNetworkSettings := &docker.NetworkSettings{IPAddress: "0.0.0.0"}
-	mockContainer := &docker.Container{HostConfig: mockHostConfig, Config: mockConfig, NetworkSettings: mockNetworkSettings}
+	mockHostConfig := &dockercontainer.HostConfig{NetworkMode: dockercontainer.NetworkMode("bridge")}
+	mockConfig := &dockercontainer.Config{Image: "image"}
+	mockNetworkSettings := &types.NetworkSettings{
+		NetworkSettingsBase: types.NetworkSettingsBase{
+			LinkLocalIPv6Address: "0.0.0.0",
+		},
+	}
+	mockContainer := &types.ContainerJSON{
+		ContainerJSONBase: &types.ContainerJSONBase{
+			HostConfig: mockHostConfig,
+		},
+		Config:          mockConfig,
+		NetworkSettings: mockNetworkSettings,
+	}
 
 	expectedStatus := string(MetadataReady)
 
 	newManager := &metadataManager{
-		cluster:              mockCluster,
-		containerInstanceARN: mockContainerInstanceARN,
-		availabilityZone:     mockAvailabilityZone,
+		cluster:                mockCluster,
+		containerInstanceARN:   mockContainerInstanceARN,
+		availabilityZone:       mockAvailabilityZone,
+		hostPrivateIPv4Address: mockHostPrivateIPv4Address,
+		hostPublicIPv4Address:  mockHostPublicIPv4Address,
 	}
 
 	metadata := newManager.parseMetadata(mockContainer, mockTask, mockContainerName)
@@ -256,6 +371,8 @@ func TestParseTaskDefinitionSettings(t *testing.T) {
 	assert.Equal(t, metadata.taskMetadata.taskDefinitionRevision, "", "Expected no task definition revision")
 	assert.Equal(t, metadata.containerInstanceARN, mockContainerInstanceARN, "Expected container instance ARN "+mockContainerInstanceARN)
 	assert.Equal(t, metadata.availabilityZone, mockAvailabilityZone, "Expected availabilityZone "+mockAvailabilityZone)
+	assert.Equal(t, metadata.hostPrivateIPv4Address, mockHostPrivateIPv4Address, "Expected hostPrivateIPv4Address "+hostPrivateIPv4Address)
+	assert.Equal(t, metadata.hostPublicIPv4Address, mockHostPublicIPv4Address, "Expected hostPublicIPv4Address "+hostPublicIPv4Address)
 	assert.Equal(t, string(metadata.metadataStatus), expectedStatus, "Expected status "+expectedStatus)
 
 	// now add the task definition details

@@ -1,6 +1,6 @@
 // +build windows,unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -26,16 +26,26 @@ import (
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/config"
-	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource/credentialspec"
+	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
+	"github.com/golang/mock/gomock"
 
-	"github.com/fsouza/go-dockerclient"
+	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
+	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/assert"
+
+	mock_credentials "github.com/aws/amazon-ecs-agent/agent/credentials/mocks"
+	mock_s3_factory "github.com/aws/amazon-ecs-agent/agent/s3/factory/mocks"
+	mock_ssm_factory "github.com/aws/amazon-ecs-agent/agent/ssm/factory/mocks"
 )
 
 const (
-	expectedMemorySwappinessDefault = memorySwappinessDefault
-	minDockerClientAPIVersion       = dockerclient.Version_1_24
+	minDockerClientAPIVersion = dockerclient.Version_1_24
+
+	nonZeroMemoryReservationValue  = 1
+	expectedMemoryReservationValue = 0
 )
 
 func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
@@ -74,7 +84,8 @@ func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
 		Version:             "1",
 		Containers: []*apicontainer.Container{
 			{
-				Name: "myName",
+				Name:          "myName",
+				TaskARNUnsafe: "myArn",
 				MountPoints: []apicontainer.MountPoint{
 					{
 						ContainerPath: `c:\container\path`,
@@ -99,11 +110,11 @@ func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
 	seqNum := int64(42)
 	task, err := TaskFromACS(&taskFromAcs, &ecsacs.PayloadMessage{SeqNum: &seqNum})
 	assert.Nil(t, err, "Should be able to handle acs task")
-	cfg := config.Config{TaskCPUMemLimit: config.ExplicitlyDisabled}
+	cfg := config.Config{TaskCPUMemLimit: config.BooleanDefaultTrue{Value: config.ExplicitlyDisabled}}
 	task.PostUnmarshalTask(&cfg, nil, nil, nil, nil)
 
 	for _, container := range task.Containers { // remove v3 endpoint from each container because it's randomly generated
-		removeV3EndpointConfig(container)
+		removeV3andV4EndpointConfig(container)
 	}
 	assert.Equal(t, expectedTask.Containers, task.Containers, "Containers should be equal")
 	assert.Equal(t, expectedTask.Volumes, task.Volumes, "Volumes should be equal")
@@ -111,10 +122,11 @@ func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
 
 // removeV3EndpointConfig removes the v3 endpoint id and the injected env for a container
 // so that checking all other fields can be easier
-func removeV3EndpointConfig(container *apicontainer.Container) {
+func removeV3andV4EndpointConfig(container *apicontainer.Container) {
 	container.SetV3EndpointID("")
 	if container.Environment != nil {
 		delete(container.Environment, apicontainer.MetadataURIEnvironmentVariableName)
+		delete(container.Environment, apicontainer.MetadataURIEnvVarNameV4)
 	}
 	if len(container.Environment) == 0 {
 		container.Environment = nil
@@ -127,53 +139,21 @@ func TestWindowsPlatformHostConfigOverride(t *testing.T) {
 
 	task := &Task{}
 
-	hostConfig := &docker.HostConfig{CPUShares: int64(1 * cpuSharesPerCore)}
+	hostConfig := &dockercontainer.HostConfig{Resources: dockercontainer.Resources{CPUShares: int64(1 * cpuSharesPerCore)}}
 
 	task.platformHostConfigOverride(hostConfig)
 	assert.Equal(t, int64(1*cpuSharesPerCore*percentageFactor)/int64(cpuShareScaleFactor), hostConfig.CPUPercent)
 	assert.Equal(t, int64(0), hostConfig.CPUShares)
-	assert.EqualValues(t, expectedMemorySwappinessDefault, hostConfig.MemorySwappiness)
 
-	hostConfig = &docker.HostConfig{CPUShares: 10}
+	hostConfig = &dockercontainer.HostConfig{Resources: dockercontainer.Resources{CPUShares: 10}}
 	task.platformHostConfigOverride(hostConfig)
 	assert.Equal(t, int64(minimumCPUPercent), hostConfig.CPUPercent)
 	assert.Empty(t, hostConfig.CPUShares)
 }
 
-func TestWindowsMemorySwappinessOption(t *testing.T) {
-	// Testing sending a task to windows overriding MemorySwappiness value
-	rawHostConfigInput := docker.HostConfig{}
-
-	rawHostConfig, err := json.Marshal(&rawHostConfigInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	testTask := &Task{
-		Arn:     "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
-		Family:  "myFamily",
-		Version: "1",
-		Containers: []*apicontainer.Container{
-			{
-				Name: "c1",
-				DockerConfig: apicontainer.DockerConfig{
-					HostConfig: strptr(string(rawHostConfig)),
-				},
-			},
-		},
-	}
-
-	config, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), minDockerClientAPIVersion)
-	if configErr != nil {
-		t.Fatal(configErr)
-	}
-
-	assert.EqualValues(t, expectedMemorySwappinessDefault, config.MemorySwappiness)
-}
-
 func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 	// Use a struct that will marshal to the actual message we expect; not
-	// docker.HostConfig which will include a lot of zero values.
+	// dockercontainer.HostConfig which will include a lot of zero values.
 	rawHostConfigInput := struct {
 		Privileged  bool     `json:"Privileged,omitempty" yaml:"Privileged,omitempty"`
 		SecurityOpt []string `json:"SecurityOpt,omitempty" yaml:"SecurityOpt,omitempty"`
@@ -208,7 +188,8 @@ func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 		},
 	}
 
-	hostConfig, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), minDockerClientAPIVersion)
+	hostConfig, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+		minDockerClientAPIVersion, &config.Config{})
 	assert.Nil(t, configErr)
 
 	expected := docker.HostConfig{
@@ -236,62 +217,56 @@ func TestSetConfigHostconfigBasedOnAPIVersion(t *testing.T) {
 				Memory: uint(memoryMiB),
 			},
 		},
+		Privileged:  true,
+		SecurityOpt: []string{"foo", "bar"},
+		VolumesFrom: []string{"dockername-c2"},
 	}
 
-	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), minDockerClientAPIVersion)
-	assert.Nil(t, err)
-
-	config, cerr := testTask.DockerConfig(testTask.Containers[0], minDockerClientAPIVersion)
-	assert.Nil(t, cerr)
-	assert.Equal(t, int64(memoryMiB*1024*1024), hostconfig.Memory)
-	assert.Empty(t, hostconfig.CPUShares)
-	assert.Equal(t, int64(minimumCPUPercent), hostconfig.CPUPercent)
-
-	assert.Empty(t, config.CPUShares)
-	assert.Empty(t, config.Memory)
+	assert.Nil(t, expected.MemorySwappiness, "Expected default memorySwappiness to be nil")
+	assertSetStructFieldsEqual(t, expected, *hostConfig)
 }
 
 func TestCPUPercentBasedOnUnboundedEnabled(t *testing.T) {
 	cpuShareScaleFactor := runtime.NumCPU() * cpuSharesPerCore
 	testcases := []struct {
 		cpu          int64
-		cpuUnbounded bool
+		cpuUnbounded config.BooleanDefaultFalse
 		cpuPercent   int64
 	}{
 		{
 			cpu:          0,
-			cpuUnbounded: true,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 			cpuPercent:   0,
 		},
 		{
 			cpu:          1,
-			cpuUnbounded: true,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 			cpuPercent:   1,
 		},
 		{
 			cpu:          0,
-			cpuUnbounded: false,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 			cpuPercent:   1,
 		},
 		{
 			cpu:          1,
-			cpuUnbounded: false,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 			cpuPercent:   1,
 		},
 		{
 			cpu:          100,
-			cpuUnbounded: true,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 			cpuPercent:   100 * percentageFactor / int64(cpuShareScaleFactor),
 		},
 		{
 			cpu:          100,
-			cpuUnbounded: false,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 			cpuPercent:   100 * percentageFactor / int64(cpuShareScaleFactor),
 		},
 	}
 	for _, tc := range testcases {
 		t.Run(fmt.Sprintf("container cpu-%d,cpu unbounded tasks enabled- %t,expected cpu percent-%d",
-			tc.cpu, tc.cpuUnbounded, tc.cpuPercent), func(t *testing.T) {
+			tc.cpu, tc.cpuUnbounded.Enabled(), tc.cpuPercent), func(t *testing.T) {
 			testTask := &Task{
 				Containers: []*apicontainer.Container{
 					{
@@ -304,12 +279,59 @@ func TestCPUPercentBasedOnUnboundedEnabled(t *testing.T) {
 				},
 			}
 
-			hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), minDockerClientAPIVersion)
+			hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+				minDockerClientAPIVersion, &config.Config{})
 			assert.Nil(t, err)
 			assert.Empty(t, hostconfig.CPUShares)
 			assert.Equal(t, tc.cpuPercent, hostconfig.CPUPercent)
 		})
 	}
+}
+
+func TestWindowsMemoryReservationOption(t *testing.T) {
+	// Testing sending a task to windows overriding MemoryReservation value
+	rawHostConfigInput := dockercontainer.HostConfig{
+		Resources: dockercontainer.Resources{
+			MemoryReservation: nonZeroMemoryReservationValue,
+		},
+	}
+
+	rawHostConfig, err := json.Marshal(&rawHostConfigInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testTask := &Task{
+		Arn:     "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
+		Family:  "myFamily",
+		Version: "1",
+		Containers: []*apicontainer.Container{
+			{
+				Name: "c1",
+				DockerConfig: apicontainer.DockerConfig{
+					HostConfig: strptr(string(rawHostConfig)),
+				},
+			},
+		},
+		PlatformFields: PlatformFields{
+			MemoryUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
+		},
+	}
+
+	// With MemoryUnbounded set to false, MemoryReservation is not overridden
+	cfg, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+		defaultDockerClientAPIVersion, &config.Config{})
+
+	assert.Nil(t, configErr)
+	assert.EqualValues(t, nonZeroMemoryReservationValue, cfg.MemoryReservation)
+
+	// With MemoryUnbounded set to true, tasks with no memory hard limit will have their memory reservation set to zero
+	testTask.PlatformFields.MemoryUnbounded = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg, configErr = testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+		defaultDockerClientAPIVersion, &config.Config{})
+
+	assert.Nil(t, configErr)
+	assert.EqualValues(t, expectedMemoryReservationValue, cfg.MemoryReservation)
 }
 
 func TestGetCanonicalPath(t *testing.T) {
@@ -328,6 +350,11 @@ func TestGetCanonicalPath(t *testing.T) {
 			path:           `D:`,
 			expectedResult: `d:`,
 		},
+		{
+			name:           "pipePath",
+			path:           `\\.\pipe\docker_engine`,
+			expectedResult: `\\.\pipe\docker_engine`,
+		},
 	}
 
 	for _, tc := range testcases {
@@ -336,4 +363,170 @@ func TestGetCanonicalPath(t *testing.T) {
 			assert.Equal(t, result, tc.expectedResult)
 		})
 	}
+}
+
+func TestRequiresCredentialSpecResource(t *testing.T) {
+	container1 := &apicontainer.Container{}
+	task1 := &Task{
+		Arn:        "test",
+		Containers: []*apicontainer.Container{container1},
+	}
+
+	hostConfig := "{\"SecurityOpt\": [\"credentialspec:file://gmsa_gmsa-acct.json\"]}"
+	container2 := &apicontainer.Container{}
+	container2.DockerConfig.HostConfig = &hostConfig
+	task2 := &Task{
+		Arn:        "test",
+		Containers: []*apicontainer.Container{container2},
+	}
+
+	testCases := []struct {
+		name           string
+		task           *Task
+		expectedOutput bool
+	}{
+		{
+			name:           "missing_credentialspec",
+			task:           task1,
+			expectedOutput: false,
+		},
+		{
+			name:           "valid_credentialspec",
+			task:           task2,
+			expectedOutput: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expectedOutput, tc.task.requiresCredentialSpecResource())
+		})
+	}
+
+}
+
+func TestGetAllCredentialSpecRequirements(t *testing.T) {
+	hostConfig := "{\"SecurityOpt\": [\"credentialspec:file://gmsa_gmsa-acct.json\"]}"
+	container := &apicontainer.Container{}
+	container.DockerConfig.HostConfig = &hostConfig
+
+	task := &Task{
+		Arn:        "test",
+		Containers: []*apicontainer.Container{container},
+	}
+
+	allCredSpecReq := task.getAllCredentialSpecRequirements()
+
+	credentialspec := "credentialspec:file://gmsa_gmsa-acct.json"
+	expectedCredSpecReq := []string{credentialspec}
+
+	assert.EqualValues(t, expectedCredSpecReq, allCredSpecReq)
+}
+
+func TestGetAllCredentialSpecRequirementsWithMultipleContainersUsingSameSpec(t *testing.T) {
+	hostConfig := "{\"SecurityOpt\": [\"credentialspec:file://gmsa_gmsa-acct.json\"]}"
+	c1 := &apicontainer.Container{}
+	c1.DockerConfig.HostConfig = &hostConfig
+
+	c2 := &apicontainer.Container{}
+	c2.DockerConfig.HostConfig = &hostConfig
+
+	task := &Task{
+		Arn:        "test",
+		Containers: []*apicontainer.Container{c1, c2},
+	}
+
+	allCredSpecReq := task.getAllCredentialSpecRequirements()
+
+	credentialspec := "credentialspec:file://gmsa_gmsa-acct.json"
+	expectedCredSpecReq := []string{credentialspec}
+
+	assert.Equal(t, len(expectedCredSpecReq), len(allCredSpecReq))
+	assert.EqualValues(t, expectedCredSpecReq, allCredSpecReq)
+}
+
+func TestGetAllCredentialSpecRequirementsWithMultipleContainers(t *testing.T) {
+	hostConfig1 := "{\"SecurityOpt\": [\"credentialspec:file://gmsa_gmsa-acct-1.json\"]}"
+	hostConfig2 := "{\"SecurityOpt\": [\"credentialspec:file://gmsa_gmsa-acct-2.json\"]}"
+
+	c1 := &apicontainer.Container{}
+	c1.DockerConfig.HostConfig = &hostConfig1
+
+	c2 := &apicontainer.Container{}
+	c2.DockerConfig.HostConfig = &hostConfig1
+
+	c3 := &apicontainer.Container{}
+	c3.DockerConfig.HostConfig = &hostConfig2
+
+	task := &Task{
+		Arn:        "test",
+		Containers: []*apicontainer.Container{c1, c2, c3},
+	}
+
+	allCredSpecReq := task.getAllCredentialSpecRequirements()
+
+	credentialspec1 := "credentialspec:file://gmsa_gmsa-acct-1.json"
+	credentialspec2 := "credentialspec:file://gmsa_gmsa-acct-2.json"
+
+	expectedCredSpecReq := []string{credentialspec1, credentialspec2}
+
+	assert.EqualValues(t, expectedCredSpecReq, allCredSpecReq)
+}
+
+func TestInitializeAndGetCredentialSpecResource(t *testing.T) {
+	hostConfig := "{\"SecurityOpt\": [\"credentialspec:file://gmsa_gmsa-acct.json\"]}"
+	container := &apicontainer.Container{
+		Name:                      "myName",
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+	container.DockerConfig.HostConfig = &hostConfig
+
+	task := &Task{
+		Arn:                "test",
+		Containers:         []*apicontainer.Container{container},
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cfg := &config.Config{
+		AWSRegion: "test-aws-region",
+	}
+
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	ssmClientCreator := mock_ssm_factory.NewMockSSMClientCreator(ctrl)
+	s3ClientCreator := mock_s3_factory.NewMockS3ClientCreator(ctrl)
+
+	resFields := &taskresource.ResourceFields{
+		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
+			SSMClientCreator:   ssmClientCreator,
+			CredentialsManager: credentialsManager,
+		},
+		S3ClientCreator: s3ClientCreator,
+	}
+
+	task.initializeCredentialSpecResource(cfg, credentialsManager, resFields)
+
+	resourceDep := apicontainer.ResourceDependency{
+		Name:           credentialspec.ResourceName,
+		RequiredStatus: resourcestatus.ResourceStatus(credentialspec.CredentialSpecCreated),
+	}
+
+	assert.Equal(t, resourceDep, task.Containers[0].TransitionDependenciesMap[apicontainerstatus.ContainerCreated].ResourceDependencies[0])
+
+	_, ok := task.GetCredentialSpecResource()
+	assert.True(t, ok)
+}
+
+func TestGetCredentialSpecResource(t *testing.T) {
+	credentialspecResource := &credentialspec.CredentialSpecResource{}
+	task := &Task{
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+	}
+	task.AddResource(credentialspec.ResourceName, credentialspecResource)
+
+	credentialspecTaskResource, ok := task.GetCredentialSpecResource()
+	assert.True(t, ok)
+	assert.NotEmpty(t, credentialspecTaskResource)
 }

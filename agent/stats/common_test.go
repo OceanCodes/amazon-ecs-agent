@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,6 +14,7 @@
 package stats
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -21,16 +22,18 @@ import (
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/statechange"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 
-	"context"
-
 	"github.com/aws/aws-sdk-go/aws"
-	docker "github.com/fsouza/go-dockerclient"
+
+	"github.com/docker/docker/api/types"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	sdkClient "github.com/docker/docker/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,11 +41,11 @@ import (
 const (
 	// checkPointSleep is the sleep duration in milliseconds between
 	// starting/stopping containers in the test code.
-	checkPointSleep              = 5 * SleepBetweenUsageDataCollection
+	checkPointSleep              = 5 * time.Second
 	testContainerHealthImageName = "amazon/amazon-ecs-containerhealthcheck:make"
 
 	// defaultDockerTimeoutSeconds is the timeout for dialing the docker remote API.
-	defaultDockerTimeoutSeconds uint = 10
+	defaultDockerTimeoutSeconds = 10 * time.Second
 
 	// waitForCleanupSleep is the sleep duration in milliseconds
 	// for the waiting after container cleanup before checking the state of the manager.
@@ -62,6 +65,13 @@ var (
 
 func init() {
 	cfg.EngineAuthData = config.NewSensitiveRawMessage([]byte{})
+	cfg.ImagePullBehavior = config.ImagePullPreferCachedBehavior
+}
+
+// parseNanoTime returns the time object from a string formatted with RFC3339Nano layout.
+func parseNanoTime(value string) time.Time {
+	ts, _ := time.Parse(time.RFC3339Nano, value)
+	return ts
 }
 
 // eventStream returns the event stream used to receive container change events
@@ -73,24 +83,30 @@ func eventStream(name string) *eventstream.EventStream {
 
 // createGremlin creates the gremlin container using the docker client.
 // It is used only in the test code.
-func createGremlin(client *docker.Client) (*docker.Container, error) {
-	container, err := client.CreateContainer(docker.CreateContainerOptions{
-		Config: &docker.Config{
+func createGremlin(client *sdkClient.Client, netMode string) (*dockercontainer.ContainerCreateCreatedBody, error) {
+	containerGremlin, err := client.ContainerCreate(context.TODO(),
+		&dockercontainer.Config{
 			Image: testImageName,
 		},
-	})
+		&dockercontainer.HostConfig{
+			NetworkMode: dockercontainer.NetworkMode(netMode),
+		},
+		&network.NetworkingConfig{},
+		"")
 
-	return container, err
+	return &containerGremlin, err
 }
 
-func createHealthContainer(client *docker.Client) (*docker.Container, error) {
-	container, err := client.CreateContainer(docker.CreateContainerOptions{
-		Config: &docker.Config{
+func createHealthContainer(client *sdkClient.Client) (*dockercontainer.ContainerCreateCreatedBody, error) {
+	container, err := client.ContainerCreate(context.TODO(),
+		&dockercontainer.Config{
 			Image: testContainerHealthImageName,
 		},
-	})
+		&dockercontainer.HostConfig{},
+		&network.NetworkingConfig{},
+		"")
 
-	return container, err
+	return &container, err
 }
 
 type IntegContainerMetadataResolver struct {
@@ -142,11 +158,20 @@ func validateContainerMetrics(containerMetrics []*ecstcs.ContainerMetric, expect
 		return fmt.Errorf("Mismatch in number of ContainerStatsSet elements. Expected: %d, Got: %d", expected, len(containerMetrics))
 	}
 	for _, containerMetric := range containerMetrics {
+		if *containerMetric.ContainerName == "" {
+			return fmt.Errorf("ContainerName is empty")
+		}
 		if containerMetric.CpuStatsSet == nil {
 			return fmt.Errorf("CPUStatsSet is nil")
 		}
 		if containerMetric.MemoryStatsSet == nil {
 			return fmt.Errorf("MemoryStatsSet is nil")
+		}
+		if containerMetric.NetworkStatsSet == nil {
+			return fmt.Errorf("NetworkStatsSet is nil")
+		}
+		if containerMetric.StorageStatsSet == nil {
+			return fmt.Errorf("StorageStatsSet is nil")
 		}
 	}
 	return nil
@@ -241,9 +266,19 @@ func validateEmptyTaskHealthMetrics(t *testing.T, engine *DockerStatsEngine) {
 }
 
 func createFakeContainerStats() []*ContainerStats {
+	netStats := &NetworkStats{
+		RxBytes:   796,
+		RxDropped: 6,
+		RxErrors:  0,
+		RxPackets: 10,
+		TxBytes:   8192,
+		TxDropped: 5,
+		TxErrors:  0,
+		TxPackets: 60,
+	}
 	return []*ContainerStats{
-		{22400432, 1839104, parseNanoTime("2015-02-12T21:22:05.131117533Z")},
-		{116499979, 3649536, parseNanoTime("2015-02-12T21:22:05.232291187Z")},
+		{22400432, 1839104, uint64(100), uint64(200), netStats, parseNanoTime("2015-02-12T21:22:05.131117533Z")},
+		{116499979, 3649536, uint64(300), uint64(400), netStats, parseNanoTime("2015-02-12T21:22:05.232291187Z")},
 	}
 }
 
@@ -264,7 +299,7 @@ func (engine *MockTaskEngine) StateChangeEvents() chan statechange.Event {
 	return make(chan statechange.Event)
 }
 
-func (engine *MockTaskEngine) SetSaver(statemanager.Saver) {
+func (engine *MockTaskEngine) SetDataClient(data.Client) {
 }
 
 func (engine *MockTaskEngine) AddTask(*apitask.Task) {
@@ -290,9 +325,21 @@ func (engine *MockTaskEngine) Version() (string, error) {
 	return "", nil
 }
 
+func (engine *MockTaskEngine) LoadState() error {
+	return nil
+}
+
+func (engine *MockTaskEngine) SaveState() error {
+	return nil
+}
+
 func (engine *MockTaskEngine) Capabilities() []*ecs.Attribute {
 	return nil
 }
 
 func (engine *MockTaskEngine) Disable() {
+}
+
+func (engine *MockTaskEngine) Info() (types.Info, error) {
+	return types.Info{}, nil
 }

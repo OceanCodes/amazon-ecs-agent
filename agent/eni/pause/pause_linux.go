@@ -1,6 +1,6 @@
 // +build linux
 
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -18,21 +18,21 @@ package pause
 import (
 	"context"
 	"fmt"
+	"os"
 
-	"github.com/aws/amazon-ecs-agent/agent/acs/update_handler/os"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
-	docker "github.com/fsouza/go-dockerclient"
 
 	log "github.com/cihub/seelog"
+	"github.com/docker/docker/api/types"
 	"github.com/pkg/errors"
 )
 
 // LoadImage helps load the pause container image for the agent
-func (*loader) LoadImage(ctx context.Context, cfg *config.Config, dockerClient dockerapi.DockerClient) (*docker.Image, error) {
+func (*loader) LoadImage(ctx context.Context, cfg *config.Config, dockerClient dockerapi.DockerClient) (*types.ImageInspect, error) {
 	log.Debugf("Loading pause container tarball: %s", cfg.PauseContainerTarballPath)
-	if err := loadFromFile(ctx, cfg.PauseContainerTarballPath, dockerClient, os.Default); err != nil {
+	if err := loadFromFile(ctx, cfg.PauseContainerTarballPath, dockerClient); err != nil {
 		return nil, err
 	}
 
@@ -40,8 +40,26 @@ func (*loader) LoadImage(ctx context.Context, cfg *config.Config, dockerClient d
 		config.DefaultPauseContainerImageName, config.DefaultPauseContainerTag, dockerClient)
 }
 
-func loadFromFile(ctx context.Context, path string, dockerClient dockerapi.DockerClient, fs os.FileSystem) error {
-	pauseContainerReader, err := fs.Open(path)
+func (*loader) IsLoaded(dockerClient dockerapi.DockerClient) (bool, error) {
+	image, err := getPauseContainerImage(
+		config.DefaultPauseContainerImageName, config.DefaultPauseContainerTag, dockerClient)
+
+	if err != nil {
+		return false, errors.Wrapf(err,
+			"pause container inspect: failed to inspect image: %s", config.DefaultPauseContainerImageName)
+	}
+
+	if image == nil || image.ID == "" {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+var open = os.Open
+
+func loadFromFile(ctx context.Context, path string, dockerClient dockerapi.DockerClient) error {
+	pauseContainerReader, err := open(path)
 	if err != nil {
 		if err.Error() == noSuchFile {
 			return NewNoSuchFileError(errors.Wrapf(err,
@@ -59,7 +77,7 @@ func loadFromFile(ctx context.Context, path string, dockerClient dockerapi.Docke
 
 }
 
-func getPauseContainerImage(name string, tag string, dockerClient dockerapi.DockerClient) (*docker.Image, error) {
+func getPauseContainerImage(name string, tag string, dockerClient dockerapi.DockerClient) (*types.ImageInspect, error) {
 	imageName := fmt.Sprintf("%s:%s", name, tag)
 	log.Debugf("Inspecting pause container image: %s", imageName)
 

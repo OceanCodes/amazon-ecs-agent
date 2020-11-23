@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +32,11 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
-	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/engine/mocks"
+	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
+	mock_engine "github.com/aws/amazon-ecs-agent/agent/engine/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/statechange"
-	"github.com/aws/amazon-ecs-agent/agent/utils/ttime/mocks"
-	docker "github.com/fsouza/go-dockerclient"
+	mock_ttime "github.com/aws/amazon-ecs-agent/agent/utils/ttime/mocks"
+	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/golang/mock/gomock"
 	"github.com/pborman/uuid"
 	"github.com/stretchr/testify/assert"
@@ -48,7 +49,15 @@ const (
 
 var (
 	defaultDockerClientAPIVersion = dockerclient.Version_1_17
+	// some unassigned ports to use for tests
+	// see https://www.speedguide.net/port.php?port=24685
+	unassignedPort int32 = 24685
 )
+
+// getUnassignedPort returns a NEW unassigned port each time it's called.
+func getUnassignedPort() uint16 {
+	return uint16(atomic.AddInt32(&unassignedPort, 1))
+}
 
 func discardEvents(from interface{}) func() {
 	done := make(chan bool)
@@ -133,13 +142,13 @@ func validateContainerRunWorkflow(t *testing.T,
 	imageManager *mock_engine.MockImageManager,
 	client *mock_dockerapi.MockDockerClient,
 	roleCredentials *credentials.TaskIAMRoleCredentials,
-	containerEventsWG sync.WaitGroup,
+	containerEventsWG *sync.WaitGroup,
 	eventStream chan dockerapi.DockerContainerChangeEvent,
 	createdContainerName chan<- string,
 	assertions func(),
 ) {
 	imageManager.EXPECT().AddAllImageStates(gomock.Any()).AnyTimes()
-	client.EXPECT().PullImage(container.Image, nil).Return(dockerapi.DockerContainerMetadata{})
+	client.EXPECT().PullImage(gomock.Any(), container.Image, nil, gomock.Any()).Return(dockerapi.DockerContainerMetadata{})
 	imageManager.EXPECT().RecordContainerReference(container).Return(nil)
 	imageManager.EXPECT().GetImageStateFromImageName(gomock.Any()).Return(nil, false)
 	client.EXPECT().APIVersion().Return(defaultDockerClientAPIVersion, nil)
@@ -161,6 +170,8 @@ func validateContainerRunWorkflow(t *testing.T,
 		container.SetV3EndpointID(v3EndpointID)
 		metadataEndpointEnvValue := fmt.Sprintf(apicontainer.MetadataURIFormat, v3EndpointID)
 		dockerConfig.Env = append(dockerConfig.Env, "ECS_CONTAINER_METADATA_URI="+metadataEndpointEnvValue)
+		metadataEndpointEnvValueV4 := fmt.Sprintf(apicontainer.MetadataURIFormatV4, v3EndpointID)
+		dockerConfig.Env = append(dockerConfig.Env, "ECS_CONTAINER_METADATA_URI_V4="+metadataEndpointEnvValueV4)
 	}
 	// Container config should get updated with this during CreateContainer
 	dockerConfig.Labels["com.amazonaws.ecs.task-arn"] = task.Arn
@@ -169,7 +180,7 @@ func validateContainerRunWorkflow(t *testing.T,
 	dockerConfig.Labels["com.amazonaws.ecs.task-definition-version"] = task.Version
 	dockerConfig.Labels["com.amazonaws.ecs.cluster"] = ""
 	client.EXPECT().CreateContainer(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Do(
-		func(ctx interface{}, config *docker.Config, y interface{}, containerName string, z time.Duration) {
+		func(ctx interface{}, config *dockercontainer.Config, y interface{}, containerName string, z time.Duration) {
 			checkDockerConfigsExceptEnv(t, dockerConfig, config)
 			checkDockerConfigsEnv(t, dockerConfig, config)
 			// sleep5 task contains only one container. Just assign
@@ -198,7 +209,7 @@ func validateContainerRunWorkflow(t *testing.T,
 // its container config to docker config, it iterates over the container's env map and
 // append them into docker config's env slice. So the sequence for the env slice is undetermined,
 // and it needs other logic to check equality.
-func checkDockerConfigsExceptEnv(t *testing.T, expectedConfig *docker.Config, config *docker.Config) {
+func checkDockerConfigsExceptEnv(t *testing.T, expectedConfig *dockercontainer.Config, config *dockercontainer.Config) {
 	expectedConfigEnvList := expectedConfig.Env
 	configEnvList := config.Env
 	expectedConfig.Env = nil
@@ -213,7 +224,7 @@ func checkDockerConfigsExceptEnv(t *testing.T, expectedConfig *docker.Config, co
 
 // checkDockerConfigsEnv checks whether two docker configs have same list of environment
 // variables and each has same value, ignoring the order.
-func checkDockerConfigsEnv(t *testing.T, expectedConfig *docker.Config, config *docker.Config) {
+func checkDockerConfigsEnv(t *testing.T, expectedConfig *dockercontainer.Config, config *dockercontainer.Config) {
 	expectedConfigEnvList := expectedConfig.Env
 	configEnvList := config.Env
 
@@ -229,7 +240,7 @@ func addTaskToEngine(t *testing.T,
 	taskEngine TaskEngine,
 	sleepTask *apitask.Task,
 	mockTime *mock_ttime.MockTime,
-	createStartEventsReported sync.WaitGroup) {
+	createStartEventsReported *sync.WaitGroup) {
 	// steadyStateCheckWait is used to force the test to wait until the steady-state check
 	// has been invoked at least once
 	mockTime.EXPECT().Now().Return(time.Now()).AnyTimes()

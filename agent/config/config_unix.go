@@ -1,5 +1,5 @@
 // +build !windows
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,9 +16,11 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
+	"github.com/aws/amazon-ecs-agent/agent/utils"
 )
 
 const (
@@ -26,7 +28,7 @@ const (
 	AgentCredentialsAddress = "" // this is left blank right now for net=bridge
 	// defaultAuditLogFile specifies the default audit log filename
 	defaultCredentialsAuditLogFile = "/log/audit.log"
-	// Default cgroup prefix for ECS tasks
+	// DefaultTaskCgroupPrefix is default cgroup prefix for ECS tasks
 	DefaultTaskCgroupPrefix = "/ecs"
 
 	// Default cgroup memory system root path, this is the default used if the
@@ -43,40 +45,58 @@ const (
 // DefaultConfig returns the default configuration for Linux
 func DefaultConfig() Config {
 	return Config{
-		DockerEndpoint:                     "unix:///var/run/docker.sock",
-		ReservedPorts:                      []uint16{SSHPort, DockerReservedPort, DockerReservedSSLPort, AgentIntrospectionPort, AgentCredentialsPort},
-		ReservedPortsUDP:                   []uint16{},
-		DataDir:                            "/data/",
-		DataDirOnHost:                      "/var/lib/ecs",
-		DisableMetrics:                     false,
-		ReservedMemory:                     0,
-		AvailableLoggingDrivers:            []dockerclient.LoggingDriver{dockerclient.JSONFileDriver, dockerclient.NoneDriver},
-		TaskCleanupWaitDuration:            DefaultTaskCleanupWaitDuration,
-		DockerStopTimeout:                  defaultDockerStopTimeout,
-		ContainerStartTimeout:              defaultContainerStartTimeout,
-		CredentialsAuditLogFile:            defaultCredentialsAuditLogFile,
-		CredentialsAuditLogDisabled:        false,
-		ImageCleanupDisabled:               false,
-		MinimumImageDeletionAge:            DefaultImageDeletionAge,
-		ImageCleanupInterval:               DefaultImageCleanupTimeInterval,
-		ImagePullInactivityTimeout:         defaultImagePullInactivityTimeout,
-		NumImagesToDeletePerCycle:          DefaultNumImagesToDeletePerCycle,
-		CNIPluginsPath:                     defaultCNIPluginsPath,
-		PauseContainerTarballPath:          pauseContainerTarballPath,
-		PauseContainerImageName:            DefaultPauseContainerImageName,
-		PauseContainerTag:                  DefaultPauseContainerTag,
-		AWSVPCBlockInstanceMetdata:         false,
-		ContainerMetadataEnabled:           false,
-		TaskCPUMemLimit:                    DefaultEnabled,
-		CgroupPath:                         defaultCgroupPath,
-		TaskMetadataSteadyStateRate:        DefaultTaskMetadataSteadyStateRate,
-		TaskMetadataBurstRate:              DefaultTaskMetadataBurstRate,
-		SharedVolumeMatchFullConfig:        false, // only requiring shared volumes to match on name, which is default docker behavior
-		ContainerInstancePropagateTagsFrom: ContainerInstancePropagateTagsFromNoneType,
+		DockerEndpoint:                      "unix:///var/run/docker.sock",
+		ReservedPorts:                       []uint16{SSHPort, DockerReservedPort, DockerReservedSSLPort, AgentIntrospectionPort, AgentCredentialsPort},
+		ReservedPortsUDP:                    []uint16{},
+		DataDir:                             "/data/",
+		DataDirOnHost:                       "/var/lib/ecs",
+		DisableMetrics:                      BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		ReservedMemory:                      0,
+		AvailableLoggingDrivers:             []dockerclient.LoggingDriver{dockerclient.JSONFileDriver, dockerclient.NoneDriver},
+		TaskCleanupWaitDuration:             DefaultTaskCleanupWaitDuration,
+		DockerStopTimeout:                   defaultDockerStopTimeout,
+		ContainerStartTimeout:               defaultContainerStartTimeout,
+		CredentialsAuditLogFile:             defaultCredentialsAuditLogFile,
+		CredentialsAuditLogDisabled:         false,
+		ImageCleanupDisabled:                BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		MinimumImageDeletionAge:             DefaultImageDeletionAge,
+		NonECSMinimumImageDeletionAge:       DefaultNonECSImageDeletionAge,
+		ImageCleanupInterval:                DefaultImageCleanupTimeInterval,
+		ImagePullInactivityTimeout:          defaultImagePullInactivityTimeout,
+		ImagePullTimeout:                    DefaultImagePullTimeout,
+		NumImagesToDeletePerCycle:           DefaultNumImagesToDeletePerCycle,
+		NumNonECSContainersToDeletePerCycle: DefaultNumNonECSContainersToDeletePerCycle,
+		CNIPluginsPath:                      defaultCNIPluginsPath,
+		PauseContainerTarballPath:           pauseContainerTarballPath,
+		PauseContainerImageName:             DefaultPauseContainerImageName,
+		PauseContainerTag:                   DefaultPauseContainerTag,
+		AWSVPCBlockInstanceMetdata:          BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		ContainerMetadataEnabled:            BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		TaskCPUMemLimit:                     BooleanDefaultTrue{Value: NotSet},
+		CgroupPath:                          defaultCgroupPath,
+		TaskMetadataSteadyStateRate:         DefaultTaskMetadataSteadyStateRate,
+		TaskMetadataBurstRate:               DefaultTaskMetadataBurstRate,
+		SharedVolumeMatchFullConfig:         BooleanDefaultFalse{Value: ExplicitlyDisabled}, // only requiring shared volumes to match on name, which is default docker behavior
+		ContainerInstancePropagateTagsFrom:  ContainerInstancePropagateTagsFromNoneType,
+		PrometheusMetricsEnabled:            false,
+		PollMetrics:                         BooleanDefaultTrue{Value: ExplicitlyDisabled},
+		PollingMetricsWaitDuration:          DefaultPollingMetricsWaitDuration,
+		NvidiaRuntime:                       DefaultNvidiaRuntime,
+		CgroupCPUPeriod:                     defaultCgroupCPUPeriod,
+		GMSACapable:                         false,
 	}
 }
 
-func (cfg *Config) platformOverrides() {}
+func (cfg *Config) platformOverrides() {
+	cfg.PrometheusMetricsEnabled = utils.ParseBool(os.Getenv("ECS_ENABLE_PROMETHEUS_METRICS"), false)
+	if cfg.PrometheusMetricsEnabled {
+		cfg.ReservedPorts = append(cfg.ReservedPorts, AgentPrometheusExpositionPort)
+	}
+
+	if cfg.TaskENIEnabled.Enabled() { // when task networking is enabled, eni trunking is enabled by default
+		cfg.ENITrunkingEnabled = parseBooleanDefaultTrueConfig("ECS_ENABLE_HIGH_DENSITY_ENI")
+	}
+}
 
 // platformString returns platform-specific config data that can be serialized
 // to string for debugging

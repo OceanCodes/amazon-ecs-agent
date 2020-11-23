@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -13,20 +13,21 @@
 package handler
 
 import (
-	"fmt"
-
 	"context"
+	"fmt"
 
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
 	"github.com/aws/amazon-ecs-agent/agent/api"
+	apiappmesh "github.com/aws/amazon-ecs-agent/agent/api/appmesh"
 	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/cihub/seelog"
 )
@@ -40,15 +41,16 @@ type payloadRequestHandler struct {
 	ctx         context.Context
 	taskEngine  engine.TaskEngine
 	ecsClient   api.ECSClient
-	saver       statemanager.Saver
+	dataClient  data.Client
 	taskHandler *eventhandler.TaskHandler
 	// cancel is used to stop go routines started by start() method
-	cancel               context.CancelFunc
-	cluster              string
-	containerInstanceArn string
-	acsClient            wsclient.ClientServer
-	refreshHandler       refreshCredentialsHandler
-	credentialsManager   credentials.Manager
+	cancel                      context.CancelFunc
+	cluster                     string
+	containerInstanceArn        string
+	acsClient                   wsclient.ClientServer
+	refreshHandler              refreshCredentialsHandler
+	credentialsManager          credentials.Manager
+	latestSeqNumberTaskManifest *int64
 }
 
 // newPayloadRequestHandler returns a new payloadRequestHandler object
@@ -59,26 +61,27 @@ func newPayloadRequestHandler(
 	cluster string,
 	containerInstanceArn string,
 	acsClient wsclient.ClientServer,
-	saver statemanager.Saver,
+	dataClient data.Client,
 	refreshHandler refreshCredentialsHandler,
 	credentialsManager credentials.Manager,
-	taskHandler *eventhandler.TaskHandler) payloadRequestHandler {
+	taskHandler *eventhandler.TaskHandler, seqNumTaskManifest *int64) payloadRequestHandler {
 	// Create a cancelable context from the parent context
 	derivedContext, cancel := context.WithCancel(ctx)
 	return payloadRequestHandler{
-		messageBuffer:        make(chan *ecsacs.PayloadMessage, payloadMessageBufferSize),
-		ackRequest:           make(chan string, payloadMessageBufferSize),
-		taskEngine:           taskEngine,
-		ecsClient:            ecsClient,
-		saver:                saver,
-		taskHandler:          taskHandler,
-		ctx:                  derivedContext,
-		cancel:               cancel,
-		cluster:              cluster,
-		containerInstanceArn: containerInstanceArn,
-		acsClient:            acsClient,
-		refreshHandler:       refreshHandler,
-		credentialsManager:   credentialsManager,
+		messageBuffer:               make(chan *ecsacs.PayloadMessage, payloadMessageBufferSize),
+		ackRequest:                  make(chan string, payloadMessageBufferSize),
+		taskEngine:                  taskEngine,
+		ecsClient:                   ecsClient,
+		dataClient:                  dataClient,
+		taskHandler:                 taskHandler,
+		ctx:                         derivedContext,
+		cancel:                      cancel,
+		cluster:                     cluster,
+		containerInstanceArn:        containerInstanceArn,
+		acsClient:                   acsClient,
+		refreshHandler:              refreshHandler,
+		credentialsManager:          credentialsManager,
+		latestSeqNumberTaskManifest: seqNumTaskManifest,
 	}
 }
 
@@ -151,13 +154,14 @@ func (payloadHandler *payloadRequestHandler) handleSingleMessage(payload *ecsacs
 	}
 	seelog.Debugf("Received payload message, message id: %s", aws.StringValue(payload.MessageId))
 	credentialsAcks, allTasksHandled := payloadHandler.addPayloadTasks(payload)
-	// save the state of tasks we know about after passing them to the task engine
-	err := payloadHandler.saver.Save()
-	if err != nil {
-		seelog.Errorf("Error saving state for payload message! err: %v, messageId: %s", err, aws.StringValue(payload.MessageId))
-		// Don't ack; maybe we can save it in the future.
-		return fmt.Errorf("error saving state for payload message, with messageId: %s", aws.StringValue(payload.MessageId))
+
+	// Update latestSeqNumberTaskManifest for it to get updated in state file
+	if payloadHandler.latestSeqNumberTaskManifest != nil && payload.SeqNum != nil &&
+		*payloadHandler.latestSeqNumberTaskManifest < *payload.SeqNum {
+
+		*payloadHandler.latestSeqNumberTaskManifest = *payload.SeqNum
 	}
+
 	if !allTasksHandled {
 		return fmt.Errorf("did not handle all tasks")
 	}
@@ -193,16 +197,17 @@ func (payloadHandler *payloadRequestHandler) addPayloadTasks(payload *ecsacs.Pay
 			allTasksOK = false
 			continue
 		}
+
 		if task.RoleCredentials != nil {
 			// The payload from ACS for the task has credentials for the
 			// task. Add those to the credentials manager and set the
 			// credentials id for the task as well
 			taskIAMRoleCredentials := credentials.IAMRoleCredentialsFromACS(task.RoleCredentials, credentials.ApplicationRoleType)
 			err = payloadHandler.credentialsManager.SetTaskCredentials(
-				credentials.TaskIAMRoleCredentials{
+				&(credentials.TaskIAMRoleCredentials{
 					ARN:                aws.StringValue(task.Arn),
 					IAMRoleCredentials: taskIAMRoleCredentials,
-				})
+				}))
 			if err != nil {
 				payloadHandler.handleUnrecognizedTask(task, err, payload)
 				allTasksOK = false
@@ -211,27 +216,38 @@ func (payloadHandler *payloadRequestHandler) addPayloadTasks(payload *ecsacs.Pay
 			apiTask.SetCredentialsID(taskIAMRoleCredentials.CredentialsID)
 		}
 
-		// Adding the eni information to the task struct
-		if len(task.ElasticNetworkInterfaces) != 0 {
-			eni, err := apieni.ENIFromACS(task.ElasticNetworkInterfaces)
+		// Add ENI information to the task struct.
+		for _, acsENI := range task.ElasticNetworkInterfaces {
+			eni, err := apieni.ENIFromACS(acsENI)
 			if err != nil {
 				payloadHandler.handleUnrecognizedTask(task, err, payload)
 				allTasksOK = false
 				continue
 			}
-
-			apiTask.SetTaskENI(eni)
+			apiTask.AddTaskENI(eni)
 		}
+
+		// Add the app mesh information to task struct
+		if task.ProxyConfiguration != nil {
+			appmesh, err := apiappmesh.AppMeshFromACS(task.ProxyConfiguration)
+			if err != nil {
+				payloadHandler.handleUnrecognizedTask(task, err, payload)
+				allTasksOK = false
+				continue
+			}
+			apiTask.SetAppMesh(appmesh)
+		}
+
 		if task.ExecutionRoleCredentials != nil {
 			// The payload message contains execution credentials for the task.
 			// Add the credentials to the credentials manager and set the
 			// task executionCredentials id.
 			taskExecutionIAMRoleCredentials := credentials.IAMRoleCredentialsFromACS(task.ExecutionRoleCredentials, credentials.ExecutionRoleType)
 			err = payloadHandler.credentialsManager.SetTaskCredentials(
-				credentials.TaskIAMRoleCredentials{
+				&(credentials.TaskIAMRoleCredentials{
 					ARN:                aws.StringValue(task.Arn),
 					IAMRoleCredentials: taskExecutionIAMRoleCredentials,
-				})
+				}))
 			if err != nil {
 				payloadHandler.handleUnrecognizedTask(task, err, payload)
 				allTasksOK = false
@@ -242,6 +258,7 @@ func (payloadHandler *payloadRequestHandler) addPayloadTasks(payload *ecsacs.Pay
 
 		validTasks = append(validTasks, apiTask)
 	}
+
 	// Add 'stop' transitions first to allow seqnum ordering to work out
 	// Because a 'start' sequence number should only be proceeded if all 'stop's
 	// of the same sequence number have completed, the 'start' events need to be
@@ -253,8 +270,7 @@ func (payloadHandler *payloadRequestHandler) addPayloadTasks(payload *ecsacs.Pay
 	}
 
 	// Construct a slice with credentials acks from all tasks
-	var credentialsAcks []*ecsacs.IAMRoleCredentialsAckRequest
-	credentialsAcks = append(stoppedTasksCredentialsAcks, newTasksCredentialsAcks...)
+	credentialsAcks := append(stoppedTasksCredentialsAcks, newTasksCredentialsAcks...)
 	return credentialsAcks, allTasksOK
 }
 
@@ -268,6 +284,16 @@ func (payloadHandler *payloadRequestHandler) addTasks(payload *ecsacs.PayloadMes
 			continue
 		}
 		payloadHandler.taskEngine.AddTask(task)
+		// Only need to save task to DB when its desired status is RUNNING (i.e. this is a new task that we are going
+		// to manage). When its desired status is STOPPED, the task is already in the DB and the desired status change
+		// will be saved by task manager.
+		if task.GetDesiredStatus() == apitaskstatus.TaskRunning {
+			err := payloadHandler.dataClient.SaveTask(task)
+			if err != nil {
+				seelog.Errorf("Failed to save data for task %s: %v", task.Arn, err)
+				allTasksOK = false
+			}
+		}
 
 		ackCredentials := func(id string, description string) {
 			ack, err := payloadHandler.ackCredentials(payload.MessageId, id)
@@ -311,12 +337,12 @@ func (payloadHandler *payloadRequestHandler) ackCredentials(messageID *string, c
 // and returns the boolean comparison result
 type skipAddTaskComparatorFunc func(apitaskstatus.TaskStatus) bool
 
-// isTaskStatusStopped returns true if the task status == STOPPTED
+// isTaskStatusStopped returns true if the task status == STOPPED
 func isTaskStatusStopped(status apitaskstatus.TaskStatus) bool {
 	return status == apitaskstatus.TaskStopped
 }
 
-// isTaskStatusNotStopped returns true if the task status != STOPPTED
+// isTaskStatusNotStopped returns true if the task status != STOPPED
 func isTaskStatusNotStopped(status apitaskstatus.TaskStatus) bool {
 	return status != apitaskstatus.TaskStopped
 }

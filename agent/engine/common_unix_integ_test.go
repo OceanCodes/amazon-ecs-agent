@@ -1,7 +1,7 @@
 // +build linux
 // +build sudo integration
 
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -31,9 +31,13 @@ func createTestContainer() *apicontainer.Container {
 	return createTestContainerWithImageAndName(testRegistryImage, "netcat")
 }
 
+// getLongRunningCommand returns the command that keeps the container running for the container
+// that uses the default integ test image (amazon/amazon-ecs-netkitten for unix)
+func getLongRunningCommand() []string {
+	return []string{"-loop=true"}
+}
+
 func isDockerRunning() bool {
-	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
-		return false
-	}
-	return true
+	_, err := os.Stat("/var/run/docker.sock")
+	return err == nil
 }

@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -18,31 +18,37 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
 	"github.com/aws/amazon-ecs-agent/agent/api"
-	"github.com/aws/amazon-ecs-agent/agent/api/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/api/eni"
+	mock_api "github.com/aws/amazon-ecs-agent/agent/api/mocks"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
-	"github.com/aws/amazon-ecs-agent/agent/engine/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/data"
+	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
+	mock_engine "github.com/aws/amazon-ecs-agent/agent/engine/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
-	"github.com/aws/amazon-ecs-agent/agent/wsclient/mock"
+	mock_wsclient "github.com/aws/amazon-ecs-agent/agent/wsclient/mock"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
 	clusterName          = "default"
 	containerInstanceArn = "instance"
 	payloadMessageId     = "123"
+	testTaskARN          = "arn:aws:ecs:us-west-2:1234567890:task/test-cluster/abc"
 )
 
 // testHelper wraps all the object required for the test
@@ -52,7 +58,6 @@ type testHelper struct {
 	mockTaskEngine     *mock_engine.MockTaskEngine
 	ecsClient          api.ECSClient
 	mockWsClient       *mock_wsclient.MockClientServer
-	saver              statemanager.Saver
 	credentialsManager credentials.Manager
 	eventHandler       *eventhandler.TaskHandler
 	ctx                context.Context
@@ -64,10 +69,10 @@ func setup(t *testing.T) *testHelper {
 	taskEngine := mock_engine.NewMockTaskEngine(ctrl)
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	mockWsClient := mock_wsclient.NewMockClientServer(ctrl)
-	stateManager := statemanager.NewNoopStateManager()
 	credentialsManager := credentials.NewManager()
 	ctx, cancel := context.WithCancel(context.Background())
-	taskHandler := eventhandler.NewTaskHandler(ctx, stateManager, nil, nil)
+	taskHandler := eventhandler.NewTaskHandler(ctx, data.NewNoopClient(), nil, nil)
+	latestSeqNumberTaskManifest := int64(10)
 
 	handler := newPayloadRequestHandler(
 		ctx,
@@ -76,10 +81,10 @@ func setup(t *testing.T) *testHelper {
 		clusterName,
 		containerInstanceArn,
 		mockWsClient,
-		stateManager,
+		data.NewNoopClient(),
 		refreshCredentialsHandler{},
 		credentialsManager,
-		taskHandler)
+		taskHandler, &latestSeqNumberTaskManifest)
 
 	return &testHelper{
 		ctrl:               ctrl,
@@ -87,7 +92,6 @@ func setup(t *testing.T) *testHelper {
 		mockTaskEngine:     taskEngine,
 		ecsClient:          ecsClient,
 		mockWsClient:       mockWsClient,
-		saver:              stateManager,
 		credentialsManager: credentialsManager,
 		eventHandler:       taskHandler,
 		ctx:                ctx,
@@ -117,11 +121,76 @@ func TestHandlePayloadMessageWithNoMessageId(t *testing.T) {
 	assert.Error(t, err, "Expected error while adding a task with no message id")
 }
 
-// TestHandlePayloadMessageStateSaveError tests that agent does not ack payload messages
-// when state saver fails to save state
-func TestHandlePayloadMessageStateSaveError(t *testing.T) {
+func TestHandlePayloadMessageSaveData(t *testing.T) {
+	testCases := []struct {
+		name              string
+		taskDesiredStatus string
+		shouldSave        bool
+	}{
+		{
+			name:              "task with desired status RUNNING is saved",
+			taskDesiredStatus: "RUNNING",
+			shouldSave:        true,
+		},
+		{
+			name:              "task with desired status STOPPED is not saved",
+			taskDesiredStatus: "STOPPED",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tester := setup(t)
+			defer tester.ctrl.Finish()
+			var ackRequested *ecsacs.AckRequest
+			tester.mockWsClient.EXPECT().MakeRequest(gomock.Any()).Do(func(ackRequest *ecsacs.AckRequest) {
+				ackRequested = ackRequest
+				tester.cancel()
+			}).Times(1)
+			tester.mockTaskEngine.EXPECT().AddTask(gomock.Any()).Times(1)
+
+			dataClient, cleanup := newTestDataClient(t)
+			defer cleanup()
+			tester.payloadHandler.dataClient = dataClient
+
+			go tester.payloadHandler.start()
+			err := tester.payloadHandler.handleSingleMessage(&ecsacs.PayloadMessage{
+				Tasks: []*ecsacs.Task{
+					{
+						Arn:           aws.String(testTaskARN),
+						DesiredStatus: aws.String(tc.taskDesiredStatus),
+					},
+				},
+				MessageId: aws.String(payloadMessageId),
+			})
+			assert.NoError(t, err)
+
+			// Wait till we get an ack from the ackBuffer.
+			select {
+			case <-tester.ctx.Done():
+			}
+			// Verify the message id acked
+			assert.Equal(t, aws.StringValue(ackRequested.MessageId), payloadMessageId, "received message is not expected")
+
+			tasks, err := dataClient.GetTasks()
+			require.NoError(t, err)
+			if tc.shouldSave {
+				assert.Len(t, tasks, 1)
+			} else {
+				assert.Len(t, tasks, 0)
+			}
+		})
+	}
+}
+
+// TestHandlePayloadMessageSaveDataError tests that agent does not ack payload messages
+// when state saver fails to save task into db.
+func TestHandlePayloadMessageSaveDataError(t *testing.T) {
 	tester := setup(t)
 	defer tester.ctrl.Finish()
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
 
 	// Save added task in the addedTask variable
 	var addedTask *apitask.Task
@@ -129,29 +198,41 @@ func TestHandlePayloadMessageStateSaveError(t *testing.T) {
 		addedTask = task
 	}).Times(1)
 
-	stateManager := mock_statemanager.NewMockStateManager(tester.ctrl)
-	tester.payloadHandler.saver = stateManager
-	// State manager returns error on save
-	stateManager.EXPECT().Save().Return(fmt.Errorf("oops"))
+	tester.payloadHandler.dataClient = dataClient
 
-	// Check if handleSingleMessage returns an error when state manager returns error on Save()
+	// Check if handleSingleMessage returns an error when we get error saving task data.
 	err := tester.payloadHandler.handleSingleMessage(&ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
 			{
-				Arn: aws.String("t1"),
+				Arn:           aws.String("t1"), // Use an invalid task arn to trigger error on saving task.
+				DesiredStatus: aws.String("RUNNING"),
 			},
 		},
 		MessageId: aws.String(payloadMessageId),
 	})
 	assert.Error(t, err, "Expected error while adding a task from statemanager")
 
-	// We expect task to be added to the engine even though it hasn't been saved
+	// We expect task to be added to the engine even though it couldn't be saved.
 	expectedTask := &apitask.Task{
-		Arn:                "t1",
-		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Arn:                 "t1",
+		DesiredStatusUnsafe: apitaskstatus.TaskRunning,
+		ResourcesMapUnsafe:  make(map[string][]taskresource.TaskResource),
 	}
 
 	assert.Equal(t, addedTask, expectedTask, "added task is not expected")
+}
+
+func newTestDataClient(t *testing.T) (data.Client, func()) {
+	testDir, err := ioutil.TempDir("", "agent_acs_handler_unit_test")
+	require.NoError(t, err)
+
+	testClient, err := data.NewWithSetup(testDir)
+
+	cleanup := func() {
+		require.NoError(t, testClient.Close())
+		require.NoError(t, os.RemoveAll(testDir))
+	}
+	return testClient, cleanup
 }
 
 // TestHandlePayloadMessageAckedWhenTaskAdded tests if the handler generates an ack
@@ -594,8 +675,7 @@ func TestAddPayloadTaskAddsExecutionRoles(t *testing.T) {
 // validateTaskAndCredentials compares a task and a credentials ack object
 // against expected values. It returns an error if either of the the
 // comparisons fail
-func validateTaskAndCredentials(taskCredentialsAck,
-	expectedCredentialsAckForTask *ecsacs.IAMRoleCredentialsAckRequest,
+func validateTaskAndCredentials(taskCredentialsAck, expectedCredentialsAckForTask *ecsacs.IAMRoleCredentialsAckRequest,
 	addedTask *apitask.Task,
 	expectedTaskArn string,
 	expectedTaskCredentials credentials.IAMRoleCredentials) error {
@@ -644,8 +724,72 @@ func TestPayloadHandlerAddedENIToTask(t *testing.T) {
 								Address: aws.String("ipv6"),
 							},
 						},
-						MacAddress: aws.String("mac"),
+						SubnetGatewayIpv4Address: aws.String("ipv4/20"),
+						MacAddress:               aws.String("mac"),
 					},
+				},
+			},
+		},
+		MessageId: aws.String(payloadMessageId),
+	}
+
+	err := tester.payloadHandler.handleSingleMessage(payloadMessage)
+	require.NoError(t, err)
+
+	// Validate the added task has the eni information as expected
+	expectedENI := payloadMessage.Tasks[0].ElasticNetworkInterfaces[0]
+	taskeni := addedTask.GetPrimaryENI()
+	assert.Equal(t, aws.StringValue(expectedENI.Ec2Id), taskeni.ID)
+	assert.Equal(t, aws.StringValue(expectedENI.MacAddress), taskeni.MacAddress)
+	assert.Equal(t, 1, len(taskeni.IPV4Addresses))
+	assert.Equal(t, 1, len(taskeni.IPV6Addresses))
+	assert.Equal(t, aws.StringValue(expectedENI.Ipv4Addresses[0].PrivateAddress), taskeni.IPV4Addresses[0].Address)
+	assert.Equal(t, aws.StringValue(expectedENI.Ipv6Addresses[0].Address), taskeni.IPV6Addresses[0].Address)
+}
+
+func TestPayloadHandlerAddedAppMeshToTask(t *testing.T) {
+	appMeshType := "APPMESH"
+	mockEgressIgnoredIP1 := "128.0.0.1"
+	mockEgressIgnoredIP2 := "171.1.3.24"
+	mockAppPort1 := "8000"
+	mockAppPort2 := "8001"
+	mockEgressIgnoredPort1 := "13000"
+	mockEgressIgnoredPort2 := "13001"
+	mockIgnoredUID := "1337"
+	mockIgnoredGID := "2339"
+	mockProxyIngressPort := "9000"
+	mockProxyEgressPort := "9001"
+	mockAppPorts := mockAppPort1 + "," + mockAppPort2
+	mockEgressIgnoredIPs := mockEgressIgnoredIP1 + "," + mockEgressIgnoredIP2
+	mockEgressIgnoredPorts := mockEgressIgnoredPort1 + "," + mockEgressIgnoredPort2
+	mockContainerName := "testEnvoyContainer"
+	taskMetadataEndpointIP := "169.254.170.2"
+	instanceMetadataEndpointIP := "169.254.169.254"
+	tester := setup(t)
+	defer tester.ctrl.Finish()
+
+	var addedTask *apitask.Task
+	tester.mockTaskEngine.EXPECT().AddTask(gomock.Any()).Do(
+		func(task *apitask.Task) {
+			addedTask = task
+		})
+
+	payloadMessage := &ecsacs.PayloadMessage{
+		Tasks: []*ecsacs.Task{
+			{
+				Arn: aws.String("arn"),
+				ProxyConfiguration: &ecsacs.ProxyConfiguration{
+					Type: aws.String(appMeshType),
+					Properties: map[string]*string{
+						"IgnoredUID":         aws.String(mockIgnoredUID),
+						"IgnoredGID":         aws.String(mockIgnoredGID),
+						"ProxyIngressPort":   aws.String(mockProxyIngressPort),
+						"ProxyEgressPort":    aws.String(mockProxyEgressPort),
+						"AppPorts":           aws.String(mockAppPorts),
+						"EgressIgnoredIPs":   aws.String(mockEgressIgnoredIPs),
+						"EgressIgnoredPorts": aws.String(mockEgressIgnoredPorts),
+					},
+					ContainerName: aws.String(mockContainerName),
 				},
 			},
 		},
@@ -656,14 +800,77 @@ func TestPayloadHandlerAddedENIToTask(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Validate the added task has the eni information as expected
-	expectedENI := payloadMessage.Tasks[0].ElasticNetworkInterfaces[0]
-	taskeni := addedTask.GetTaskENI()
-	assert.Equal(t, aws.StringValue(expectedENI.Ec2Id), taskeni.ID)
-	assert.Equal(t, aws.StringValue(expectedENI.MacAddress), taskeni.MacAddress)
-	assert.Equal(t, 1, len(taskeni.IPV4Addresses))
-	assert.Equal(t, 1, len(taskeni.IPV6Addresses))
-	assert.Equal(t, aws.StringValue(expectedENI.Ipv4Addresses[0].PrivateAddress), taskeni.IPV4Addresses[0].Address)
-	assert.Equal(t, aws.StringValue(expectedENI.Ipv6Addresses[0].Address), taskeni.IPV6Addresses[0].Address)
+	appMesh := addedTask.GetAppMesh()
+	assert.NotNil(t, appMesh)
+	assert.Equal(t, mockContainerName, appMesh.ContainerName)
+	assert.Equal(t, mockIgnoredUID, appMesh.IgnoredUID)
+	assert.Equal(t, mockIgnoredGID, appMesh.IgnoredGID)
+	assert.Equal(t, mockProxyIngressPort, appMesh.ProxyIngressPort)
+	assert.Equal(t, mockProxyEgressPort, appMesh.ProxyEgressPort)
+	assert.Equal(t, 2, len(appMesh.AppPorts))
+	assert.Equal(t, mockAppPort1, appMesh.AppPorts[0])
+	assert.Equal(t, mockAppPort2, appMesh.AppPorts[1])
+	assert.Equal(t, 4, len(appMesh.EgressIgnoredIPs))
+	assert.Equal(t, mockEgressIgnoredIP1, appMesh.EgressIgnoredIPs[0])
+	assert.Equal(t, mockEgressIgnoredIP2, appMesh.EgressIgnoredIPs[1])
+	assert.Equal(t, taskMetadataEndpointIP, appMesh.EgressIgnoredIPs[2])
+	assert.Equal(t, instanceMetadataEndpointIP, appMesh.EgressIgnoredIPs[3])
+	assert.Equal(t, 2, len(appMesh.EgressIgnoredPorts))
+	assert.Equal(t, mockEgressIgnoredPort1, appMesh.EgressIgnoredPorts[0])
+	assert.Equal(t, mockEgressIgnoredPort2, appMesh.EgressIgnoredPorts[1])
+}
+
+func TestPayloadHandlerAddedENITrunkToTask(t *testing.T) {
+	tester := setup(t)
+	defer tester.ctrl.Finish()
+
+	var addedTask *apitask.Task
+	tester.mockTaskEngine.EXPECT().AddTask(gomock.Any()).Do(
+		func(task *apitask.Task) {
+			addedTask = task
+		})
+
+	payloadMessage := &ecsacs.PayloadMessage{
+		Tasks: []*ecsacs.Task{
+			{
+				Arn: aws.String("arn"),
+				ElasticNetworkInterfaces: []*ecsacs.ElasticNetworkInterface{
+					{
+						InterfaceAssociationProtocol: aws.String(eni.VLANInterfaceAssociationProtocol),
+						AttachmentArn:                aws.String("arn"),
+						Ec2Id:                        aws.String("ec2id"),
+						Ipv4Addresses: []*ecsacs.IPv4AddressAssignment{
+							{
+								Primary:        aws.Bool(true),
+								PrivateAddress: aws.String("ipv4"),
+							},
+						},
+						Ipv6Addresses: []*ecsacs.IPv6AddressAssignment{
+							{
+								Address: aws.String("ipv6"),
+							},
+						},
+						SubnetGatewayIpv4Address: aws.String("ipv4/20"),
+						MacAddress:               aws.String("mac"),
+						InterfaceVlanProperties: &ecsacs.NetworkInterfaceVlanProperties{
+							VlanId:                   aws.String("12345"),
+							TrunkInterfaceMacAddress: aws.String("mac"),
+						},
+					},
+				},
+			},
+		},
+		MessageId: aws.String(payloadMessageId),
+	}
+
+	err := tester.payloadHandler.handleSingleMessage(payloadMessage)
+	require.NoError(t, err)
+
+	taskeni := addedTask.GetPrimaryENI()
+
+	assert.Equal(t, taskeni.InterfaceAssociationProtocol, eni.VLANInterfaceAssociationProtocol)
+	assert.Equal(t, taskeni.InterfaceVlanProperties.TrunkInterfaceMacAddress, "mac")
+	assert.Equal(t, taskeni.InterfaceVlanProperties.VlanID, "12345")
 }
 
 func TestPayloadHandlerAddedECRAuthData(t *testing.T) {
@@ -768,7 +975,7 @@ func TestHandleUnrecognizedTask(t *testing.T) {
 	}
 
 	mockECSACSClient := mock_api.NewMockECSClient(tester.ctrl)
-	taskHandler := eventhandler.NewTaskHandler(tester.ctx, tester.payloadHandler.saver, nil, mockECSACSClient)
+	taskHandler := eventhandler.NewTaskHandler(tester.ctx, data.NewNoopClient(), dockerstate.NewTaskEngineState(), mockECSACSClient)
 	tester.payloadHandler.taskHandler = taskHandler
 
 	wait := &sync.WaitGroup{}
@@ -781,4 +988,45 @@ func TestHandleUnrecognizedTask(t *testing.T) {
 
 	tester.payloadHandler.handleUnrecognizedTask(ecsacsTask, errors.New("test error"), payloadMessage)
 	wait.Wait()
+}
+
+func TestPayloadHandlerAddedFirelensData(t *testing.T) {
+	tester := setup(t)
+	defer tester.ctrl.Finish()
+
+	var addedTask *apitask.Task
+	tester.mockTaskEngine.EXPECT().AddTask(gomock.Any()).Do(
+		func(task *apitask.Task) {
+			addedTask = task
+		})
+
+	payloadMessage := &ecsacs.PayloadMessage{
+		Tasks: []*ecsacs.Task{
+			{
+				Arn: aws.String("arn"),
+				Containers: []*ecsacs.Container{
+					{
+						FirelensConfiguration: &ecsacs.FirelensConfiguration{
+							Type: aws.String("fluentd"),
+							Options: map[string]*string{
+								"enable-ecs-log-metadata": aws.String("true"),
+							},
+						},
+					},
+				},
+			},
+		},
+		MessageId: aws.String(payloadMessageId),
+	}
+
+	err := tester.payloadHandler.handleSingleMessage(payloadMessage)
+	assert.NoError(t, err)
+
+	// Validate the pieces of the Firelens container
+	expected := payloadMessage.Tasks[0].Containers[0].FirelensConfiguration
+	actual := addedTask.Containers[0].FirelensConfig
+
+	assert.Equal(t, aws.StringValue(expected.Type), actual.Type)
+	assert.NotNil(t, actual.Options)
+	assert.Equal(t, aws.StringValue(expected.Options["enable-ecs-log-metadata"]), actual.Options["enable-ecs-log-metadata"])
 }

@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -13,7 +13,7 @@
 
 package dockerclient
 
-import   (
+import (
 	"fmt"
 	"strconv"
 	"strings"
@@ -22,8 +22,8 @@ import   (
 type DockerAPIVersion string
 
 type dockerVersion struct {
-	major             int
-	minor             int
+	major int
+	minor int
 }
 
 // Matches returns whether or not a version matches a given selector.
@@ -112,14 +112,14 @@ func parseDockerVersions(version string) (dockerVersion, error) {
 // than rhs, 0 if they are equal, and 1 if lhs is greater than rhs
 func compareDockerVersions(lhs, rhs dockerVersion) int {
 	switch {
-		case lhs.major < rhs.major:
-			return -1
-		case lhs.major > rhs.major:
-			return 1
-		case lhs.minor < rhs.minor:
-			return -1
-		case lhs.minor > rhs.minor:
-			return 1
+	case lhs.major < rhs.major:
+		return -1
+	case lhs.major > rhs.major:
+		return 1
+	case lhs.minor < rhs.minor:
+		return -1
+	case lhs.minor > rhs.minor:
+		return 1
 	}
 	return 0
 }

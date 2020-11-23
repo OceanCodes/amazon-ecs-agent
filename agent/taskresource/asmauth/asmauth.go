@@ -1,4 +1,4 @@
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,6 +19,7 @@ import (
 	"time"
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/asm"
 	"github.com/aws/amazon-ecs-agent/agent/asm/factory"
@@ -27,14 +28,13 @@ import (
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
 
 	"github.com/cihub/seelog"
-	"github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
 	"github.com/pkg/errors"
 )
 
 const (
 	// ResourceName is the name of the ASM auth resource
-	ResourceName              = "asm-auth"
-	resourceProvisioningError = "TaskResourceError: Agent could not create task's platform resources"
+	ResourceName = "asm-auth"
 )
 
 // ASMAuthResource represents private registry credentials as a task resource.
@@ -55,7 +55,7 @@ type ASMAuthResource struct {
 
 	// required for asm private registry auth
 	requiredASMResources []*apicontainer.ASMAuthData
-	dockerAuthData       map[string]docker.AuthConfiguration
+	dockerAuthData       map[string]types.AuthConfig
 	// asmClientCreator is a factory interface that creates new ASM clients. This is
 	// needed mostly for testing as we're creating an asm client per every item in
 	// the requiredASMResources list. Each of these items could be from different
@@ -250,7 +250,7 @@ func (auth *ASMAuthResource) GetCreatedAt() time.Time {
 func (auth *ASMAuthResource) Create() error {
 	seelog.Infof("ASM Auth: Retrieving credentials for containers in task: [%s]", auth.taskARN)
 	if auth.dockerAuthData == nil {
-		auth.dockerAuthData = make(map[string]docker.AuthConfiguration)
+		auth.dockerAuthData = make(map[string]types.AuthConfig)
 	}
 	for _, a := range auth.GetRequiredASMResources() {
 		err := auth.retrieveASMDockerAuthData(a)
@@ -328,7 +328,7 @@ func (auth *ASMAuthResource) clearASMDockerAuthConfig() {
 
 // GetASMDockerAuthConfig retrieves the docker private registry auth data from
 // the task
-func (auth *ASMAuthResource) GetASMDockerAuthConfig(secretID string) (docker.AuthConfiguration, bool) {
+func (auth *ASMAuthResource) GetASMDockerAuthConfig(secretID string) (types.AuthConfig, bool) {
 	auth.lock.RLock()
 	defer auth.lock.RUnlock()
 
@@ -406,5 +406,25 @@ func (auth *ASMAuthResource) UnmarshalJSON(b []byte) error {
 	auth.taskARN = temp.TaskARN
 	auth.executionCredentialsID = temp.ExecutionCredentialsID
 
+	return nil
+}
+
+// GetAppliedStatus safely returns the currently applied status of the resource
+func (auth *ASMAuthResource) GetAppliedStatus() resourcestatus.ResourceStatus {
+	auth.lock.RLock()
+	defer auth.lock.RUnlock()
+
+	return auth.appliedStatus
+}
+
+func (auth *ASMAuthResource) DependOnTaskNetwork() bool {
+	return false
+}
+
+func (auth *ASMAuthResource) BuildContainerDependency(containerName string, satisfied apicontainerstatus.ContainerStatus,
+	dependent resourcestatus.ResourceStatus) {
+}
+
+func (auth *ASMAuthResource) GetContainerDependencies(dependent resourcestatus.ResourceStatus) []apicontainer.ContainerDependency {
 	return nil
 }

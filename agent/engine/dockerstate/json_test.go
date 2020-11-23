@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -135,7 +135,18 @@ const (
             ],
             "IPV6Addresses": null,
             "MacAddress": "0a:1b:2c:3d:4e:5f"
-          }
+          },
+          "associations": [
+            {
+              "containers": ["foo"],
+              "content": {
+                "encoding": "base64",
+                "value": "val"
+              },
+              "name": "dev1",
+              "type": "elastic-inference"
+            }
+          ]
         }
       ],
       "IdToContainer": {

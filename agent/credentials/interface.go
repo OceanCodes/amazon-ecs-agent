@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -17,7 +17,7 @@ package credentials
 // instance of the credentials manager is created in the agent, and shared
 // between the task engine, acs and credentials handlers
 type Manager interface {
-	SetTaskCredentials(TaskIAMRoleCredentials) error
+	SetTaskCredentials(*TaskIAMRoleCredentials) error
 	GetTaskCredentials(string) (TaskIAMRoleCredentials, bool)
 	RemoveCredentials(string)
 }

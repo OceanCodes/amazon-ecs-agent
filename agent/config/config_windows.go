@@ -1,5 +1,5 @@
 // +build windows
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -58,7 +58,8 @@ func DefaultConfig() Config {
 	ecsRoot := filepath.Join(programData, "Amazon", "ECS")
 	dataDir := filepath.Join(ecsRoot, "data")
 	platformVariables := PlatformVariables{
-		CPUUnbounded: false,
+		CPUUnbounded:    BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		MemoryUnbounded: BooleanDefaultFalse{Value: ExplicitlyDisabled},
 	}
 	return Config{
 		DockerEndpoint: "npipe:////./pipe/docker_engine",
@@ -79,32 +80,38 @@ func DefaultConfig() Config {
 		DataDir:          dataDir,
 		// DataDirOnHost is identical to DataDir for Windows because we do not
 		// run as a container
-		DataDirOnHost:               dataDir,
-		ReservedMemory:              0,
-		AvailableLoggingDrivers:     []dockerclient.LoggingDriver{dockerclient.JSONFileDriver, dockerclient.NoneDriver, dockerclient.AWSLogsDriver},
-		TaskCleanupWaitDuration:     DefaultTaskCleanupWaitDuration,
-		DockerStopTimeout:           defaultDockerStopTimeout,
-		ContainerStartTimeout:       defaultContainerStartTimeout,
-		ImagePullInactivityTimeout:  defaultImagePullInactivityTimeout,
-		CredentialsAuditLogFile:     filepath.Join(ecsRoot, defaultCredentialsAuditLogFile),
-		CredentialsAuditLogDisabled: false,
-		ImageCleanupDisabled:        false,
-		MinimumImageDeletionAge:     DefaultImageDeletionAge,
-		ImageCleanupInterval:        DefaultImageCleanupTimeInterval,
-		NumImagesToDeletePerCycle:   DefaultNumImagesToDeletePerCycle,
-		ContainerMetadataEnabled:    false,
-		TaskCPUMemLimit:             ExplicitlyDisabled,
-		PlatformVariables:           platformVariables,
-		TaskMetadataSteadyStateRate: DefaultTaskMetadataSteadyStateRate,
-		TaskMetadataBurstRate:       DefaultTaskMetadataBurstRate,
-		SharedVolumeMatchFullConfig: false, //only requiring shared volumes to match on name, which is default docker behavior
+		DataDirOnHost:                       dataDir,
+		ReservedMemory:                      0,
+		AvailableLoggingDrivers:             []dockerclient.LoggingDriver{dockerclient.JSONFileDriver, dockerclient.NoneDriver, dockerclient.AWSLogsDriver},
+		TaskCleanupWaitDuration:             DefaultTaskCleanupWaitDuration,
+		DockerStopTimeout:                   defaultDockerStopTimeout,
+		ContainerStartTimeout:               defaultContainerStartTimeout,
+		ImagePullInactivityTimeout:          defaultImagePullInactivityTimeout,
+		ImagePullTimeout:                    DefaultImagePullTimeout,
+		CredentialsAuditLogFile:             filepath.Join(ecsRoot, defaultCredentialsAuditLogFile),
+		CredentialsAuditLogDisabled:         false,
+		ImageCleanupDisabled:                BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		MinimumImageDeletionAge:             DefaultImageDeletionAge,
+		NonECSMinimumImageDeletionAge:       DefaultNonECSImageDeletionAge,
+		ImageCleanupInterval:                DefaultImageCleanupTimeInterval,
+		NumImagesToDeletePerCycle:           DefaultNumImagesToDeletePerCycle,
+		NumNonECSContainersToDeletePerCycle: DefaultNumNonECSContainersToDeletePerCycle,
+		ContainerMetadataEnabled:            BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		TaskCPUMemLimit:                     BooleanDefaultTrue{Value: ExplicitlyDisabled},
+		PlatformVariables:                   platformVariables,
+		TaskMetadataSteadyStateRate:         DefaultTaskMetadataSteadyStateRate,
+		TaskMetadataBurstRate:               DefaultTaskMetadataBurstRate,
+		SharedVolumeMatchFullConfig:         BooleanDefaultFalse{Value: ExplicitlyDisabled}, //only requiring shared volumes to match on name, which is default docker behavior
+		PollMetrics:                         BooleanDefaultTrue{Value: ExplicitlyDisabled},
+		PollingMetricsWaitDuration:          DefaultPollingMetricsWaitDuration,
+		GMSACapable:                         true,
 	}
 }
 
 func (cfg *Config) platformOverrides() {
 	// Enabling task IAM roles for Windows requires the credential proxy to run on port 80,
 	// so we reserve this port by default when that happens.
-	if cfg.TaskIAMRoleEnabled {
+	if cfg.TaskIAMRoleEnabled.Enabled() {
 		if cfg.ReservedPorts == nil {
 			cfg.ReservedPorts = []uint16{}
 		}
@@ -112,11 +119,14 @@ func (cfg *Config) platformOverrides() {
 	}
 
 	// ensure TaskResourceLimit is disabled
-	cfg.TaskCPUMemLimit = ExplicitlyDisabled
+	cfg.TaskCPUMemLimit.Value = ExplicitlyDisabled
 
-	cpuUnbounded := utils.ParseBool(os.Getenv("ECS_ENABLE_CPU_UNBOUNDED_WINDOWS_WORKAROUND"), false)
+	cpuUnbounded := parseBooleanDefaultFalseConfig("ECS_ENABLE_CPU_UNBOUNDED_WINDOWS_WORKAROUND")
+	memoryUnbounded := parseBooleanDefaultFalseConfig("ECS_ENABLE_MEMORY_UNBOUNDED_WINDOWS_WORKAROUND")
+
 	platformVariables := PlatformVariables{
-		CPUUnbounded: cpuUnbounded,
+		CPUUnbounded:    cpuUnbounded,
+		MemoryUnbounded: memoryUnbounded,
 	}
 	cfg.PlatformVariables = platformVariables
 }

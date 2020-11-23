@@ -1,6 +1,6 @@
 // +build unit,windows
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -17,38 +17,49 @@ package containermetadata
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
+	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
+	"github.com/aws/amazon-ecs-agent/agent/utils/oswrapper"
 
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
 
+var mockMkdirAll = func(path string, perm os.FileMode) error {
+	return nil
+}
+
 // TestCreate is the mainline case for metadata create
 func TestCreate(t *testing.T) {
-	_, _, mockOS, mockFile, done := managerSetup(t)
+	_, mockFile, done := managerSetup(t)
 	defer done()
 
 	mockTaskARN := validTaskARN
 	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
-	mockConfig := &docker.Config{Env: make([]string, 0)}
-	mockHostConfig := &docker.HostConfig{Binds: make([]string, 0)}
+	mockConfig := &dockercontainer.Config{Env: make([]string, 0)}
+	mockHostConfig := &dockercontainer.HostConfig{Binds: make([]string, 0)}
+	mockDockerSecurityOptions := types.Info{SecurityOptions: make([]string, 0)}.SecurityOptions
 
-	gomock.InOrder(
-		mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil),
-		mockOS.EXPECT().OpenFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(mockFile, nil),
-		mockFile.EXPECT().Write(gomock.Any()).Return(0, nil),
-		mockFile.EXPECT().Sync().Return(nil),
-		mockFile.EXPECT().Close().Return(nil),
-	)
-
-	newManager := &metadataManager{
-		osWrap: mockOS,
+	tempOpenFile := openFile
+	openFile = func(name string, flag int, perm os.FileMode) (oswrapper.File, error) {
+		return mockFile, nil
 	}
-	err := newManager.Create(mockConfig, mockHostConfig, mockTask, mockContainerName)
+	mkdirAll = mockMkdirAll
+
+	defer func() {
+		mkdirAll = os.MkdirAll
+		openFile = tempOpenFile
+	}()
+
+	newManager := &metadataManager{}
+	err := newManager.Create(mockConfig, mockHostConfig, mockTask, mockContainerName, mockDockerSecurityOptions)
 
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(mockConfig.Env), "Unexpected number of environment variables in config")
@@ -57,40 +68,46 @@ func TestCreate(t *testing.T) {
 
 // TestUpdate is happy path case for metadata update
 func TestUpdate(t *testing.T) {
-	mockClient, _, mockOS, mockFile, done := managerSetup(t)
+	mockClient, mockFile, done := managerSetup(t)
 	defer done()
 
 	mockDockerID := dockerID
 	mockTaskARN := validTaskARN
 	mockTask := &apitask.Task{Arn: mockTaskARN}
 	mockContainerName := containerName
-	mockState := docker.State{
+	mockState := types.ContainerState{
 		Running: true,
 	}
 
-	mockConfig := &docker.Config{Image: "image"}
+	mockConfig := &dockercontainer.Config{Image: "image"}
 
-	mockNetworks := make(map[string]docker.ContainerNetwork)
-	mockNetworkSettings := &docker.NetworkSettings{Networks: mockNetworks}
+	mockNetworks := map[string]*network.EndpointSettings{}
+	mockNetworkSettings := types.NetworkSettings{Networks: mockNetworks}
 
-	mockContainer := &docker.Container{
-		State:           mockState,
+	mockContainer := types.ContainerJSON{
+		ContainerJSONBase: &types.ContainerJSONBase{
+			State: &mockState,
+		},
 		Config:          mockConfig,
-		NetworkSettings: mockNetworkSettings,
+		NetworkSettings: &mockNetworkSettings,
 	}
 
 	newManager := &metadataManager{
 		client: mockClient,
-		osWrap: mockOS,
 	}
 
+	tempOpenFile := openFile
+	openFile = func(name string, flag int, perm os.FileMode) (oswrapper.File, error) {
+		return mockFile, nil
+	}
+	defer func() {
+		openFile = tempOpenFile
+	}()
+
 	gomock.InOrder(
-		mockClient.EXPECT().InspectContainer(gomock.Any(), mockDockerID, inspectContainerTimeout).Return(mockContainer, nil),
-		mockOS.EXPECT().OpenFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(mockFile, nil),
-		mockFile.EXPECT().Write(gomock.Any()).Return(0, nil),
-		mockFile.EXPECT().Sync().Return(nil),
-		mockFile.EXPECT().Close().Return(nil),
+		mockClient.EXPECT().InspectContainer(gomock.Any(), mockDockerID, dockerclient.InspectContainerTimeout).Return(&mockContainer, nil),
 	)
+
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	err := newManager.Update(ctx, mockDockerID, mockTask, mockContainerName)

@@ -1,4 +1,4 @@
-# Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You may
 # not use this file except in compliance with the License. A copy of the
@@ -15,7 +15,7 @@
 all: gremlin image
 
 gremlin: gremlin.go
-	docker run -v $(shell pwd):/out -v $(shell pwd)/gremlin.go:/in/gremlin.go -e CGO_ENABLED=0 golang:1.9 go build -a -x -ldflags '-s' -o /out/gremlin /in/gremlin.go
+	docker run -v $(shell pwd):/out -v $(shell pwd)/gremlin.go:/in/gremlin.go -e CGO_ENABLED=0 golang:1.12 go build -a -x -ldflags '-s' -o /out/gremlin /in/gremlin.go
 
 image: gremlin
 	@./docker-image

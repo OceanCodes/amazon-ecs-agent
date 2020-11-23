@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -34,7 +34,11 @@ const (
 	Version_1_32 DockerVersion = "1.32"
 )
 
-// getKnownAPIVersions returns all of the API versions that we know about.
+func (d DockerVersion) String() string {
+	return string(d)
+}
+
+// GetKnownAPIVersions returns all of the API versions that we know about.
 // It doesn't care if the version is supported by Docker or ECS agent
 func GetKnownAPIVersions() []DockerVersion {
 	return []DockerVersion{

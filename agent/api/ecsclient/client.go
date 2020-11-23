@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -37,11 +37,13 @@ import (
 )
 
 const (
-	ecsMaxReasonLength    = 255
-	pollEndpointCacheSize = 1
-	pollEndpointCacheTTL  = 20 * time.Minute
-	roundtripTimeout      = 5 * time.Second
-	azAttrName            = "ecs.availability-zone"
+	ecsMaxImageDigestLength = 255
+	ecsMaxReasonLength      = 255
+	ecsMaxRuntimeIDLength   = 255
+	pollEndpointCacheSize   = 1
+	pollEndpointCacheTTL    = 20 * time.Minute
+	roundtripTimeout        = 5 * time.Second
+	azAttrName              = "ecs.availability-zone"
 )
 
 // APIECSClient implements ECSClient
@@ -108,8 +110,10 @@ func (client *APIECSClient) CreateCluster(clusterName string) (string, error) {
 // ContainerInstanceARN if successful. Supplying a non-empty container
 // instance ARN allows a container instance to update its registered
 // resources.
-func (client *APIECSClient) RegisterContainerInstance(containerInstanceArn string,
-	attributes []*ecs.Attribute, tags []*ecs.Tag, registrationToken string) (string, string, error) {
+func (client *APIECSClient) RegisterContainerInstance(containerInstanceArn string, attributes []*ecs.Attribute,
+	tags []*ecs.Tag, registrationToken string, platformDevices []*ecs.PlatformDevice,
+	outpostARN string) (string, string, error) {
+
 	clusterRef := client.config.Cluster
 	// If our clusterRef is empty, we should try to create the default
 	if clusterRef == "" {
@@ -120,22 +124,29 @@ func (client *APIECSClient) RegisterContainerInstance(containerInstanceArn strin
 		}()
 		// Attempt to register without checking existence of the cluster so we don't require
 		// excess permissions in the case where the cluster already exists and is active
-		containerInstanceArn, availabilityzone, err := client.registerContainerInstance(clusterRef, containerInstanceArn, attributes, tags, registrationToken)
+		containerInstanceArn, availabilityzone, err := client.registerContainerInstance(clusterRef,
+			containerInstanceArn, attributes, tags, registrationToken, platformDevices, outpostARN)
 		if err == nil {
 			return containerInstanceArn, availabilityzone, nil
 		}
-		// If trying to register fails, try to create the cluster before calling
+
+		// If trying to register fails because the default cluster doesn't exist, try to create the cluster before calling
 		// register again
-		clusterRef, err = client.CreateCluster(clusterRef)
-		if err != nil {
-			return "", "", err
+		if apierrors.IsClusterNotFoundError(err) {
+			clusterRef, err = client.CreateCluster(clusterRef)
+			if err != nil {
+				return "", "", err
+			}
 		}
 	}
-	return client.registerContainerInstance(clusterRef, containerInstanceArn, attributes, tags, registrationToken)
+	return client.registerContainerInstance(clusterRef, containerInstanceArn, attributes, tags, registrationToken,
+		platformDevices, outpostARN)
 }
 
 func (client *APIECSClient) registerContainerInstance(clusterRef string, containerInstanceArn string,
-	attributes []*ecs.Attribute, tags []*ecs.Tag, registrationToken string) (string, string, error) {
+	attributes []*ecs.Attribute, tags []*ecs.Tag, registrationToken string,
+	platformDevices []*ecs.PlatformDevice, outpostARN string) (string, string, error) {
+
 	registerRequest := ecs.RegisterContainerInstanceInput{Cluster: &clusterRef}
 	var registrationAttributes []*ecs.Attribute
 	if containerInstanceArn != "" {
@@ -157,10 +168,13 @@ func (client *APIECSClient) registerContainerInstance(clusterRef string, contain
 
 	// Add additional attributes such as the os type
 	registrationAttributes = append(registrationAttributes, client.getAdditionalAttributes()...)
+	registrationAttributes = append(registrationAttributes, client.getOutpostAttribute(outpostARN)...)
+
 	registerRequest.Attributes = registrationAttributes
 	if len(tags) > 0 {
 		registerRequest.Tags = tags
 	}
+	registerRequest.PlatformDevices = platformDevices
 	registerRequest = client.setInstanceIdentity(registerRequest)
 
 	resources, err := client.getResources()
@@ -311,10 +325,24 @@ func validateRegisteredAttributes(expectedAttributes, actualAttributes []*ecs.At
 }
 
 func (client *APIECSClient) getAdditionalAttributes() []*ecs.Attribute {
-	return []*ecs.Attribute{{
-		Name:  aws.String("ecs.os-type"),
-		Value: aws.String(config.OSType),
-	}}
+	return []*ecs.Attribute{
+		{
+			Name:  aws.String("ecs.os-type"),
+			Value: aws.String(config.OSType),
+		},
+	}
+}
+
+func (client *APIECSClient) getOutpostAttribute(outpostARN string) []*ecs.Attribute {
+	if len(outpostARN) > 0 {
+		return []*ecs.Attribute{
+			{
+				Name:  aws.String("ecs.outpost-arn"),
+				Value: aws.String(outpostARN),
+			},
+		}
+	}
+	return []*ecs.Attribute{}
 }
 
 func (client *APIECSClient) getCustomAttributes() []*ecs.Attribute {
@@ -382,18 +410,30 @@ func (client *APIECSClient) SubmitTaskStateChange(change api.TaskStateChange) er
 	return nil
 }
 
+func trimString(inputString string, maxLen int) string {
+	if len(inputString) > maxLen {
+		trimmed := inputString[0:maxLen]
+		return trimmed
+	} else {
+		return inputString
+	}
+}
+
 func (client *APIECSClient) buildContainerStateChangePayload(change api.ContainerStateChange) *ecs.ContainerStateChange {
 	statechange := &ecs.ContainerStateChange{
 		ContainerName: aws.String(change.ContainerName),
 	}
-
+	if change.RuntimeID != "" {
+		trimmedRuntimeID := trimString(change.RuntimeID, ecsMaxRuntimeIDLength)
+		statechange.RuntimeId = aws.String(trimmedRuntimeID)
+	}
 	if change.Reason != "" {
-		if len(change.Reason) > ecsMaxReasonLength {
-			trimmed := change.Reason[0:ecsMaxReasonLength]
-			statechange.Reason = aws.String(trimmed)
-		} else {
-			statechange.Reason = aws.String(change.Reason)
-		}
+		trimmedReason := trimString(change.Reason, ecsMaxReasonLength)
+		statechange.Reason = aws.String(trimmedReason)
+	}
+	if change.ImageDigest != "" {
+		trimmedImageDigest := trimString(change.ImageDigest, ecsMaxImageDigestLength)
+		statechange.ImageDigest = aws.String(trimmedImageDigest)
 	}
 	status := change.Status
 
@@ -434,13 +474,13 @@ func (client *APIECSClient) SubmitContainerStateChange(change api.ContainerState
 		Task:          &change.TaskArn,
 		ContainerName: &change.ContainerName,
 	}
+	if change.RuntimeID != "" {
+		trimmedRuntimeID := trimString(change.RuntimeID, ecsMaxRuntimeIDLength)
+		req.RuntimeId = &trimmedRuntimeID
+	}
 	if change.Reason != "" {
-		if len(change.Reason) > ecsMaxReasonLength {
-			trimmed := change.Reason[0:ecsMaxReasonLength]
-			req.Reason = &trimmed
-		} else {
-			req.Reason = &change.Reason
-		}
+		trimmedReason := trimString(change.Reason, ecsMaxReasonLength)
+		req.Reason = &trimmedReason
 	}
 	stat := change.Status.String()
 	if stat == "DEAD" {
@@ -475,6 +515,28 @@ func (client *APIECSClient) SubmitContainerStateChange(change api.ContainerState
 		seelog.Warnf("Could not submit container state change: [%s]: %v", change.String(), err)
 		return err
 	}
+	return nil
+}
+
+func (client *APIECSClient) SubmitAttachmentStateChange(change api.AttachmentStateChange) error {
+	attachmentStatus := change.Attachment.Status.String()
+
+	req := ecs.SubmitAttachmentStateChangesInput{
+		Cluster: &client.config.Cluster,
+		Attachments: []*ecs.AttachmentStateChange{
+			{
+				AttachmentArn: aws.String(change.Attachment.AttachmentARN),
+				Status:        aws.String(attachmentStatus),
+			},
+		},
+	}
+
+	_, err := client.submitStateChangeClient.SubmitAttachmentStateChanges(&req)
+	if err != nil {
+		seelog.Warnf("Could not submit attachment state change [%s]: %v", change.String(), err)
+		return err
+	}
+
 	return nil
 }
 
@@ -522,4 +584,24 @@ func (client *APIECSClient) discoverPollEndpoint(containerInstanceArn string) (*
 	// Cache the response from ECS.
 	client.pollEndpoinCache.Set(containerInstanceArn, output)
 	return output, nil
+}
+
+func (client *APIECSClient) GetResourceTags(resourceArn string) ([]*ecs.Tag, error) {
+	output, err := client.standardClient.ListTagsForResource(&ecs.ListTagsForResourceInput{
+		ResourceArn: &resourceArn,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return output.Tags, nil
+}
+
+func (client *APIECSClient) UpdateContainerInstancesState(instanceARN string, status string) error {
+	seelog.Debugf("Invoking UpdateContainerInstancesState, status='%s' instanceARN='%s'", status, instanceARN)
+	_, err := client.standardClient.UpdateContainerInstancesState(&ecs.UpdateContainerInstancesStateInput{
+		ContainerInstances: []*string{aws.String(instanceARN)},
+		Status:             aws.String(status),
+		Cluster:            &client.config.Cluster,
+	})
+	return err
 }

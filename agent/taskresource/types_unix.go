@@ -1,6 +1,6 @@
 // +build linux
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,6 +19,7 @@ import (
 	"context"
 
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
 	cgroup "github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup/control"
 )
 
@@ -27,6 +28,7 @@ import (
 type ResourceFields struct {
 	Control cgroup.Control
 	*ResourceFieldsCommon
-	Ctx          context.Context
-	DockerClient dockerapi.DockerClient
+	Ctx              context.Context
+	DockerClient     dockerapi.DockerClient
+	NvidiaGPUManager gpu.GPUManager
 }

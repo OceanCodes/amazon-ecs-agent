@@ -1,4 +1,4 @@
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,11 +15,13 @@ package asm
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"github.com/aws/aws-sdk-go/service/secretsmanager/secretsmanageriface"
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/cihub/seelog"
+	"github.com/docker/docker/api/types"
 	"github.com/pkg/errors"
 )
 
@@ -32,29 +34,29 @@ type AuthDataValue struct {
 
 // GetDockerAuthFromASM makes the api call to the AWS Secrets Manager service to
 // retrieve the docker auth data
-func GetDockerAuthFromASM(secretID string, client secretsmanageriface.SecretsManagerAPI) (docker.AuthConfiguration, error) {
+func GetDockerAuthFromASM(secretID string, client secretsmanageriface.SecretsManagerAPI) (types.AuthConfig, error) {
 	in := &secretsmanager.GetSecretValueInput{
 		SecretId: aws.String(secretID),
 	}
 
 	out, err := client.GetSecretValue(in)
 	if err != nil {
-		return docker.AuthConfiguration{}, errors.Wrapf(err,
+		return types.AuthConfig{}, errors.Wrapf(err,
 			"asm fetching secret from the service for %s", secretID)
 	}
 
 	return extractASMValue(out)
 }
 
-func extractASMValue(out *secretsmanager.GetSecretValueOutput) (docker.AuthConfiguration, error) {
+func extractASMValue(out *secretsmanager.GetSecretValueOutput) (types.AuthConfig, error) {
 	if out == nil {
-		return docker.AuthConfiguration{}, errors.New(
+		return types.AuthConfig{}, errors.New(
 			"asm fetching authorization data: empty response")
 	}
 
 	secretValue := aws.StringValue(out.SecretString)
 	if secretValue == "" {
-		return docker.AuthConfiguration{}, errors.New(
+		return types.AuthConfig{}, errors.New(
 			"asm fetching authorization data: empty secrets value")
 	}
 
@@ -62,7 +64,7 @@ func extractASMValue(out *secretsmanager.GetSecretValueOutput) (docker.AuthConfi
 	err := json.Unmarshal([]byte(secretValue), &authDataValue)
 	if err != nil {
 		// could  not unmarshal, incorrect secret value schema
-		return docker.AuthConfiguration{}, errors.New(
+		return types.AuthConfig{}, errors.New(
 			"asm fetching authorization data: unable to unmarshal secret value, invalid schema")
 	}
 
@@ -70,21 +72,48 @@ func extractASMValue(out *secretsmanager.GetSecretValueOutput) (docker.AuthConfi
 	password := aws.StringValue(authDataValue.Password)
 
 	if username == "" {
-		return docker.AuthConfiguration{}, errors.New(
+		return types.AuthConfig{}, errors.New(
 			"asm fetching username: AuthorizationData is malformed, empty field")
 	}
 
 	if password == "" {
-		return docker.AuthConfiguration{}, errors.New(
+		return types.AuthConfig{}, errors.New(
 			"asm fetching password: AuthorizationData is malformed, empty field")
 	}
 
-	dac := docker.AuthConfiguration{
+	dac := types.AuthConfig{
 		Username: username,
 		Password: password,
 	}
 
 	return dac, nil
+}
+
+func GetSecretFromASMWithInput(input *secretsmanager.GetSecretValueInput,
+	client secretsmanageriface.SecretsManagerAPI, jsonKey string) (string, error) {
+	out, err := client.GetSecretValue(input)
+	if err != nil {
+		return "", errors.Wrapf(err, "secret %s", *input.SecretId)
+	}
+
+	if jsonKey == "" {
+		return aws.StringValue(out.SecretString), nil
+	}
+
+	secretMap := make(map[string]interface{})
+	jsonErr := json.Unmarshal([]byte(*out.SecretString), &secretMap)
+	if jsonErr != nil {
+		seelog.Warnf("Error when treating retrieved secret value with secret id %s as JSON and calling unmarshal.", *input.SecretId)
+		return "", jsonErr
+	}
+
+	secretValue, ok := secretMap[jsonKey]
+	if !ok {
+		err = errors.New(fmt.Sprintf("retrieved secret from Secrets Manager did not contain json key %s", jsonKey))
+		return "", err
+	}
+
+	return fmt.Sprintf("%v", secretValue), nil
 }
 
 // GetSecretFromASM makes the api call to the AWS Secrets Manager service to

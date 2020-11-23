@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,6 +16,7 @@ import (
 	"fmt"
 
 	"context"
+
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
@@ -133,10 +134,10 @@ func (refreshHandler *refreshCredentialsHandler) handleSingleMessage(message *ec
 		seelog.Errorf("Unknown RoleType for task in credentials message, roleType: %s arn: %s, messageId: %s", roleType, taskArn, messageId)
 	} else {
 		err = refreshHandler.credentialsManager.SetTaskCredentials(
-			credentials.TaskIAMRoleCredentials{
+			&(credentials.TaskIAMRoleCredentials{
 				ARN:                taskArn,
 				IAMRoleCredentials: credentials.IAMRoleCredentialsFromACS(message.RoleCredentials, roleType),
-			})
+			}))
 		if err != nil {
 			seelog.Errorf("Unable to update credentials for task, err: %v messageId: %s", err, messageId)
 			return fmt.Errorf("unable to update credentials %v", err)

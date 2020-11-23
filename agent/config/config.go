@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -36,7 +36,7 @@ const (
 	DockerReservedSSLPort = 2376
 	// DockerTagSeparator is the charactor used to separate names and tag in docker
 	DockerTagSeparator = ":"
-	// DockerDefaultTag is the default tag used by docker
+	// DefaultDockerTag is the default tag used by docker
 	DefaultDockerTag = "latest"
 
 	SSHPort = 22
@@ -47,6 +47,9 @@ const (
 	// AgentCredentialsPort is used to serve the credentials for tasks.
 	AgentCredentialsPort = 51679
 
+	// AgentPrometheusExpositionPort is used to expose Prometheus metrics that can be scraped by a Prometheus server
+	AgentPrometheusExpositionPort = 51680
+
 	// defaultConfigFileName is the default (json-formatted) config file
 	defaultConfigFileName = "/etc/ecs_container_agent/config.json"
 
@@ -56,6 +59,10 @@ const (
 	// DefaultTaskCleanupWaitDuration specifies the default value for task cleanup duration. It is used to
 	// clean up task's containers.
 	DefaultTaskCleanupWaitDuration = 3 * time.Hour
+
+	// DefaultPollingMetricsWaitDuration specifies the default value for polling metrics wait duration
+	// This is only used when PollMetrics is set to true
+	DefaultPollingMetricsWaitDuration = DefaultContainerMetricsPublishInterval / 2
 
 	// defaultDockerStopTimeout specifies the value for container stop timeout duration
 	defaultDockerStopTimeout = 30 * time.Second
@@ -68,9 +75,20 @@ const (
 	// image cleanup.
 	DefaultNumImagesToDeletePerCycle = 5
 
+	// DefaultNumNonECSContainersToDeletePerCycle specifies the default number of nonecs containers to delete when agent performs
+	// nonecs containers cleanup.
+	DefaultNumNonECSContainersToDeletePerCycle = 5
+
 	// DefaultImageDeletionAge specifies the default value for minimum amount of elapsed time after an image
 	// has been pulled before it can be deleted.
 	DefaultImageDeletionAge = 1 * time.Hour
+
+	// DefaultNonECSImageDeletionAge specifies the default value for minimum amount of elapsed time after an image
+	// has been created before it can be deleted
+	DefaultNonECSImageDeletionAge = 1 * time.Hour
+
+	//DefaultImagePullTimeout specifies the timeout for PullImage API.
+	DefaultImagePullTimeout = 2 * time.Hour
 
 	// minimumTaskCleanupWaitDuration specifies the minimum duration to wait before cleaning up
 	// a task's container. This is used to enforce sane values for the config.TaskCleanupWaitDuration field.
@@ -79,6 +97,14 @@ const (
 	// minimumImagePullInactivityTimeout specifies the minimum amount of time for that an image can be
 	// 'stuck' in the pull / unpack step. Very small values are unsafe and lead to high failure rate.
 	minimumImagePullInactivityTimeout = 1 * time.Minute
+
+	// minimumPollingMetricsWaitDuration specifies the minimum duration to wait before polling for new stats
+	// from docker. This is only used when PollMetrics is set to true
+	minimumPollingMetricsWaitDuration = 5 * time.Second
+
+	// maximumPollingMetricsWaitDuration specifies the maximum duration to wait before polling for new stats
+	// from docker. This is only used when PollMetrics is set to true
+	maximumPollingMetricsWaitDuration = DefaultContainerMetricsPublishInterval
 
 	// minimumDockerStopTimeout specifies the minimum value for docker StopContainer API
 	minimumDockerStopTimeout = 1 * time.Second
@@ -107,6 +133,21 @@ const (
 
 	// DefaultTaskMetadataBurstRate is set to handle 60 burst requests at once
 	DefaultTaskMetadataBurstRate = 60
+
+	//Known cached image names
+	CachedImageNameAgentContainer = "amazon/amazon-ecs-agent:latest"
+
+	// DefaultNvidiaRuntime is the name of the runtime to pass Nvidia GPUs to containers
+	DefaultNvidiaRuntime = "nvidia"
+
+	// defaultCgroupCPUPeriod is set to 100 ms to set isCFS period and quota for task limits
+	defaultCgroupCPUPeriod = 100 * time.Millisecond
+	maximumCgroupCPUPeriod = 100 * time.Millisecond
+	minimumCgroupCPUPeriod = 8 * time.Millisecond
+
+	// DefaultContainerMetricsPublishInterval is the default interval that we publish
+	// metrics to the ECS telemetry backend (TACS)
+	DefaultContainerMetricsPublishInterval = 20 * time.Second
 )
 
 const (
@@ -149,16 +190,23 @@ var (
 )
 
 // Merge merges two config files, preferring the ones on the left. Any nil or
-// zero values present in the left that are not present in the right will be
-// overridden
+// zero values present in the left that are present in the right will be overridden
 func (cfg *Config) Merge(rhs Config) *Config {
 	left := reflect.ValueOf(cfg).Elem()
 	right := reflect.ValueOf(&rhs).Elem()
 
 	for i := 0; i < left.NumField(); i++ {
 		leftField := left.Field(i)
-		if utils.ZeroOrNil(leftField.Interface()) {
-			leftField.Set(reflect.ValueOf(right.Field(i).Interface()))
+		switch leftField.Interface().(type) {
+		case BooleanDefaultFalse, BooleanDefaultTrue:
+			str, _ := json.Marshal(reflect.ValueOf(leftField.Interface()).Interface())
+			if string(str) == "null" {
+				leftField.Set(reflect.ValueOf(right.Field(i).Interface()))
+			}
+		default:
+			if utils.ZeroOrNil(leftField.Interface()) {
+				leftField.Set(reflect.ValueOf(right.Field(i).Interface()))
+			}
 		}
 	}
 
@@ -275,7 +323,7 @@ func (cfg *Config) validateAndOverrideBounds() error {
 	// If a value has been set for taskCleanupWaitDuration and the value is less than the minimum allowed cleanup duration,
 	// print a warning and override it
 	if cfg.TaskCleanupWaitDuration < minimumTaskCleanupWaitDuration {
-		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultTaskCleanupWaitDuration.String(), cfg.TaskCleanupWaitDuration, minimumTaskCleanupWaitDuration)
+		seelog.Warnf("Invalid value for ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultTaskCleanupWaitDuration.String(), cfg.TaskCleanupWaitDuration, minimumTaskCleanupWaitDuration)
 		cfg.TaskCleanupWaitDuration = DefaultTaskCleanupWaitDuration
 	}
 
@@ -285,7 +333,7 @@ func (cfg *Config) validateAndOverrideBounds() error {
 	}
 
 	if cfg.ImageCleanupInterval < minimumImageCleanupInterval {
-		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultImageCleanupTimeInterval.String(), cfg.ImageCleanupInterval, minimumImageCleanupInterval)
+		seelog.Warnf("Invalid value for ECS_IMAGE_CLEANUP_INTERVAL, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultImageCleanupTimeInterval.String(), cfg.ImageCleanupInterval, minimumImageCleanupInterval)
 		cfg.ImageCleanupInterval = DefaultImageCleanupTimeInterval
 	}
 
@@ -300,9 +348,28 @@ func (cfg *Config) validateAndOverrideBounds() error {
 		cfg.TaskMetadataBurstRate = DefaultTaskMetadataBurstRate
 	}
 
+	// check the PollMetrics specific configurations
+	cfg.pollMetricsOverrides()
+
 	cfg.platformOverrides()
 
 	return nil
+}
+
+func (cfg *Config) pollMetricsOverrides() {
+	if cfg.PollMetrics.Enabled() {
+		if cfg.PollingMetricsWaitDuration < minimumPollingMetricsWaitDuration {
+			seelog.Warnf("ECS_POLLING_METRICS_WAIT_DURATION parsed value (%s) is less than the minimum of %s. Setting polling interval to minimum.",
+				cfg.PollingMetricsWaitDuration, minimumPollingMetricsWaitDuration)
+			cfg.PollingMetricsWaitDuration = minimumPollingMetricsWaitDuration
+		}
+
+		if cfg.PollingMetricsWaitDuration > maximumPollingMetricsWaitDuration {
+			seelog.Warnf("ECS_POLLING_METRICS_WAIT_DURATION parsed value (%s) is greater than the maximum of %s. Setting polling interval to maximum.",
+				cfg.PollingMetricsWaitDuration, maximumPollingMetricsWaitDuration)
+			cfg.PollingMetricsWaitDuration = maximumPollingMetricsWaitDuration
+		}
+	}
 }
 
 // checkMissingAndDeprecated checks all zero-valued fields for tags of the form
@@ -413,7 +480,7 @@ func userDataConfig(ec2Client ec2.EC2MetadataClient) Config {
 	// we'd need to add logic to decode the string here.
 	err = json.Unmarshal([]byte(userData), &parsedUserData)
 	if err != nil {
-		seelog.Infof("Unable to parse user data: %v", err)
+		seelog.Debugf("Non-json user data, skip merging into agent config: %v", err)
 		// Unable to parse userdata as a valid JSON. Return the
 		// empty config
 		return Config{}
@@ -441,53 +508,68 @@ func environmentConfig() (Config, error) {
 		err = apierrors.NewMultiError(errs...)
 	}
 	return Config{
-		Cluster:                            os.Getenv("ECS_CLUSTER"),
-		APIEndpoint:                        os.Getenv("ECS_BACKEND_HOST"),
-		AWSRegion:                          os.Getenv("AWS_DEFAULT_REGION"),
-		DockerEndpoint:                     os.Getenv("DOCKER_HOST"),
-		ReservedPorts:                      parseReservedPorts("ECS_RESERVED_PORTS"),
-		ReservedPortsUDP:                   parseReservedPorts("ECS_RESERVED_PORTS_UDP"),
-		DataDir:                            dataDir,
-		Checkpoint:                         parseCheckpoint(dataDir),
-		EngineAuthType:                     os.Getenv("ECS_ENGINE_AUTH_TYPE"),
-		EngineAuthData:                     NewSensitiveRawMessage([]byte(os.Getenv("ECS_ENGINE_AUTH_DATA"))),
-		UpdatesEnabled:                     utils.ParseBool(os.Getenv("ECS_UPDATES_ENABLED"), false),
-		UpdateDownloadDir:                  os.Getenv("ECS_UPDATE_DOWNLOAD_DIR"),
-		DisableMetrics:                     utils.ParseBool(os.Getenv("ECS_DISABLE_METRICS"), false),
-		ReservedMemory:                     parseEnvVariableUint16("ECS_RESERVED_MEMORY"),
-		AvailableLoggingDrivers:            parseAvailableLoggingDrivers(),
-		PrivilegedDisabled:                 utils.ParseBool(os.Getenv("ECS_DISABLE_PRIVILEGED"), false),
-		SELinuxCapable:                     utils.ParseBool(os.Getenv("ECS_SELINUX_CAPABLE"), false),
-		AppArmorCapable:                    utils.ParseBool(os.Getenv("ECS_APPARMOR_CAPABLE"), false),
-		TaskCleanupWaitDuration:            parseEnvVariableDuration("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION"),
-		TaskENIEnabled:                     utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_ENI"), false),
-		TaskIAMRoleEnabled:                 utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE"), false),
-		TaskCPUMemLimit:                    parseTaskCPUMemLimitEnabled(),
-		DockerStopTimeout:                  parseDockerStopTimeout(),
-		ContainerStartTimeout:              parseContainerStartTimeout(),
-		ImagePullInactivityTimeout:         parseImagePullInactivityTimeout(),
-		CredentialsAuditLogFile:            os.Getenv("ECS_AUDIT_LOGFILE"),
-		CredentialsAuditLogDisabled:        utils.ParseBool(os.Getenv("ECS_AUDIT_LOGFILE_DISABLED"), false),
-		TaskIAMRoleEnabledForNetworkHost:   utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST"), false),
-		ImageCleanupDisabled:               utils.ParseBool(os.Getenv("ECS_DISABLE_IMAGE_CLEANUP"), false),
-		MinimumImageDeletionAge:            parseEnvVariableDuration("ECS_IMAGE_MINIMUM_CLEANUP_AGE"),
-		ImageCleanupInterval:               parseEnvVariableDuration("ECS_IMAGE_CLEANUP_INTERVAL"),
-		NumImagesToDeletePerCycle:          parseNumImagesToDeletePerCycle(),
-		ImagePullBehavior:                  parseImagePullBehavior(),
-		ImageCleanupExclusionList:          parseImageCleanupExclusionList("ECS_IMAGE_CLEANUP_EXCLUDE"),
-		InstanceAttributes:                 instanceAttributes,
-		CNIPluginsPath:                     os.Getenv("ECS_CNI_PLUGINS_PATH"),
-		AWSVPCBlockInstanceMetdata:         utils.ParseBool(os.Getenv("ECS_AWSVPC_BLOCK_IMDS"), false),
-		AWSVPCAdditionalLocalRoutes:        additionalLocalRoutes,
-		ContainerMetadataEnabled:           utils.ParseBool(os.Getenv("ECS_ENABLE_CONTAINER_METADATA"), false),
-		DataDirOnHost:                      os.Getenv("ECS_HOST_DATA_DIR"),
-		OverrideAWSLogsExecutionRole:       utils.ParseBool(os.Getenv("ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE"), false),
-		CgroupPath:                         os.Getenv("ECS_CGROUP_PATH"),
-		TaskMetadataSteadyStateRate:        steadyStateRate,
-		TaskMetadataBurstRate:              burstRate,
-		SharedVolumeMatchFullConfig:        utils.ParseBool(os.Getenv("ECS_SHARED_VOLUME_MATCH_FULL_CONFIG"), false),
-		ContainerInstanceTags:              containerInstanceTags,
-		ContainerInstancePropagateTagsFrom: parseContainerInstancePropagateTagsFrom(),
+		Cluster:                             os.Getenv("ECS_CLUSTER"),
+		APIEndpoint:                         os.Getenv("ECS_BACKEND_HOST"),
+		AWSRegion:                           os.Getenv("AWS_DEFAULT_REGION"),
+		DockerEndpoint:                      os.Getenv("DOCKER_HOST"),
+		ReservedPorts:                       parseReservedPorts("ECS_RESERVED_PORTS"),
+		ReservedPortsUDP:                    parseReservedPorts("ECS_RESERVED_PORTS_UDP"),
+		DataDir:                             dataDir,
+		Checkpoint:                          parseCheckpoint(dataDir),
+		EngineAuthType:                      os.Getenv("ECS_ENGINE_AUTH_TYPE"),
+		EngineAuthData:                      NewSensitiveRawMessage([]byte(os.Getenv("ECS_ENGINE_AUTH_DATA"))),
+		UpdatesEnabled:                      parseBooleanDefaultFalseConfig("ECS_UPDATES_ENABLED"),
+		UpdateDownloadDir:                   os.Getenv("ECS_UPDATE_DOWNLOAD_DIR"),
+		DisableMetrics:                      parseBooleanDefaultFalseConfig("ECS_DISABLE_METRICS"),
+		ReservedMemory:                      parseEnvVariableUint16("ECS_RESERVED_MEMORY"),
+		AvailableLoggingDrivers:             parseAvailableLoggingDrivers(),
+		PrivilegedDisabled:                  parseBooleanDefaultFalseConfig("ECS_DISABLE_PRIVILEGED"),
+		SELinuxCapable:                      parseBooleanDefaultFalseConfig("ECS_SELINUX_CAPABLE"),
+		AppArmorCapable:                     parseBooleanDefaultFalseConfig("ECS_APPARMOR_CAPABLE"),
+		TaskCleanupWaitDuration:             parseEnvVariableDuration("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION"),
+		TaskENIEnabled:                      parseBooleanDefaultFalseConfig("ECS_ENABLE_TASK_ENI"),
+		TaskIAMRoleEnabled:                  parseBooleanDefaultFalseConfig("ECS_ENABLE_TASK_IAM_ROLE"),
+		DeleteNonECSImagesEnabled:           parseBooleanDefaultFalseConfig("ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP"),
+		TaskCPUMemLimit:                     parseBooleanDefaultTrueConfig("ECS_ENABLE_TASK_CPU_MEM_LIMIT"),
+		DockerStopTimeout:                   parseDockerStopTimeout(),
+		ContainerStartTimeout:               parseContainerStartTimeout(),
+		ImagePullInactivityTimeout:          parseImagePullInactivityTimeout(),
+		ImagePullTimeout:                    parseEnvVariableDuration("ECS_IMAGE_PULL_TIMEOUT"),
+		CredentialsAuditLogFile:             os.Getenv("ECS_AUDIT_LOGFILE"),
+		CredentialsAuditLogDisabled:         utils.ParseBool(os.Getenv("ECS_AUDIT_LOGFILE_DISABLED"), false),
+		TaskIAMRoleEnabledForNetworkHost:    utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST"), false),
+		ImageCleanupDisabled:                parseBooleanDefaultFalseConfig("ECS_DISABLE_IMAGE_CLEANUP"),
+		MinimumImageDeletionAge:             parseEnvVariableDuration("ECS_IMAGE_MINIMUM_CLEANUP_AGE"),
+		NonECSMinimumImageDeletionAge:       parseEnvVariableDuration("NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE"),
+		ImageCleanupInterval:                parseEnvVariableDuration("ECS_IMAGE_CLEANUP_INTERVAL"),
+		NumImagesToDeletePerCycle:           parseNumImagesToDeletePerCycle(),
+		NumNonECSContainersToDeletePerCycle: parseNumNonECSContainersToDeletePerCycle(),
+		ImagePullBehavior:                   parseImagePullBehavior(),
+		ImageCleanupExclusionList:           parseImageCleanupExclusionList("ECS_EXCLUDE_UNTRACKED_IMAGE"),
+		InstanceAttributes:                  instanceAttributes,
+		CNIPluginsPath:                      os.Getenv("ECS_CNI_PLUGINS_PATH"),
+		AWSVPCBlockInstanceMetdata:          parseBooleanDefaultFalseConfig("ECS_AWSVPC_BLOCK_IMDS"),
+		AWSVPCAdditionalLocalRoutes:         additionalLocalRoutes,
+		ContainerMetadataEnabled:            parseBooleanDefaultFalseConfig("ECS_ENABLE_CONTAINER_METADATA"),
+		DataDirOnHost:                       os.Getenv("ECS_HOST_DATA_DIR"),
+		OverrideAWSLogsExecutionRole:        parseBooleanDefaultFalseConfig("ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE"),
+		CgroupPath:                          os.Getenv("ECS_CGROUP_PATH"),
+		TaskMetadataSteadyStateRate:         steadyStateRate,
+		TaskMetadataBurstRate:               burstRate,
+		SharedVolumeMatchFullConfig:         parseBooleanDefaultFalseConfig("ECS_SHARED_VOLUME_MATCH_FULL_CONFIG"),
+		ContainerInstanceTags:               containerInstanceTags,
+		ContainerInstancePropagateTagsFrom:  parseContainerInstancePropagateTagsFrom(),
+		PollMetrics:                         parseBooleanDefaultTrueConfig("ECS_POLL_METRICS"),
+		PollingMetricsWaitDuration:          parseEnvVariableDuration("ECS_POLLING_METRICS_WAIT_DURATION"),
+		DisableDockerHealthCheck:            parseBooleanDefaultFalseConfig("ECS_DISABLE_DOCKER_HEALTH_CHECK"),
+		GPUSupportEnabled:                   utils.ParseBool(os.Getenv("ECS_ENABLE_GPU_SUPPORT"), false),
+		InferentiaSupportEnabled:            utils.ParseBool(os.Getenv("ECS_ENABLE_INF_SUPPORT"), false),
+		NvidiaRuntime:                       os.Getenv("ECS_NVIDIA_RUNTIME"),
+		TaskMetadataAZDisabled:              utils.ParseBool(os.Getenv("ECS_DISABLE_TASK_METADATA_AZ"), false),
+		CgroupCPUPeriod:                     parseCgroupCPUPeriod(),
+		SpotInstanceDrainingEnabled:         parseBooleanDefaultFalseConfig("ECS_ENABLE_SPOT_INSTANCE_DRAINING"),
+		GMSACapable:                         parseGMSACapability(),
+		VolumePluginCapabilities:            parseVolumePluginCapabilities(),
 	}, err
 }
 
@@ -511,6 +593,8 @@ func (cfg *Config) String() string {
 			"AuthType: %v, "+
 			"UpdatesEnabled: %v, "+
 			"DisableMetrics: %v, "+
+			"PollMetrics: %v, "+
+			"PollingMetricsWaitDuration: %v, "+
 			"ReservedMem: %v, "+
 			"TaskCleanupWaitDuration: %v, "+
 			"DockerStopTimeout: %v, "+
@@ -524,6 +608,8 @@ func (cfg *Config) String() string {
 		cfg.EngineAuthType,
 		cfg.UpdatesEnabled,
 		cfg.DisableMetrics,
+		cfg.PollMetrics,
+		cfg.PollingMetricsWaitDuration,
 		cfg.ReservedMemory,
 		cfg.TaskCleanupWaitDuration,
 		cfg.DockerStopTimeout,

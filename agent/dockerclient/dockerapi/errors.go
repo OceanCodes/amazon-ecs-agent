@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
-	docker "github.com/fsouza/go-dockerclient"
 )
 
 const (
@@ -25,6 +24,8 @@ const (
 	DockerTimeoutErrorName = "DockerTimeoutError"
 	// CannotInspectContainerErrorName is the name of container inspect error.
 	CannotInspectContainerErrorName = "CannotInspectContainerError"
+	// CannotStartContainerErrorName is the name of container start error.
+	CannotStartContainerErrorName = "CannotStartContainerError"
 	// CannotDescribeContainerErrorName is the name of describe container error.
 	CannotDescribeContainerErrorName = "CannotDescribeContainerError"
 )
@@ -115,10 +116,7 @@ func (err CannotStopContainerError) ErrorName() string {
 // already stopped or doesn't exist at all, there's no sense in
 // retrying.
 func (err CannotStopContainerError) IsRetriableError() bool {
-	if _, ok := err.FromError.(*docker.NoSuchContainer); ok {
-		return false
-	}
-	if _, ok := err.FromError.(*docker.ContainerNotRunning); ok {
+	if _, ok := err.FromError.(NoSuchContainerError); ok {
 		return false
 	}
 
@@ -205,7 +203,7 @@ func (err CannotStartContainerError) Error() string {
 
 // ErrorName returns name of the CannotStartContainerError
 func (err CannotStartContainerError) ErrorName() string {
-	return "CannotStartContainerError"
+	return CannotStartContainerErrorName
 }
 
 // CannotInspectContainerError indicates any error when trying to inspect a container
@@ -264,6 +262,19 @@ func (err CannotListContainersError) ErrorName() string {
 	return "CannotListContainersError"
 }
 
+type CannotListImagesError struct {
+	FromError error
+}
+
+func (err CannotListImagesError) Error() string {
+	return err.FromError.Error()
+}
+
+// ErrorName returns name of the CannotListImagesError
+func (err CannotListImagesError) ErrorName() string {
+	return "CannotListImagesError"
+}
+
 // CannotCreateVolumeError indicates any error when trying to create a volume
 type CannotCreateVolumeError struct {
 	fromError error
@@ -314,4 +325,17 @@ func (err CannotListPluginsError) Error() string {
 
 func (err CannotListPluginsError) ErrorName() string {
 	return "CannotListPluginsError"
+}
+
+// NoSuchContainerError indicates error when a given container is not found.
+type NoSuchContainerError struct {
+	ID string
+}
+
+func (err NoSuchContainerError) Error() string {
+	return "Container not found: " + err.ID
+}
+
+func (err NoSuchContainerError) ErrorName() string {
+	return "NoSuchContainerError"
 }

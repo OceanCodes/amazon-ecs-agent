@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -24,6 +24,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/stats"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/pkg/errors"
 )
 
 // TelemetrySessionParams contains all the parameters required to start a tcs
@@ -49,4 +50,11 @@ func (params *TelemetrySessionParams) time() ttime.Time {
 		}
 	})
 	return params._time
+}
+
+func (params *TelemetrySessionParams) isContainerHealthMetricsDisabled() (bool, error) {
+	if params.Cfg != nil {
+		return params.Cfg.DisableMetrics.Enabled() && params.Cfg.DisableDockerHealthCheck.Enabled(), nil
+	}
+	return false, errors.New("Config is empty in the tcs session parameter")
 }

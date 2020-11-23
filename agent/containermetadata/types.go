@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -20,8 +20,7 @@ import (
 	"time"
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
-
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
 )
 
 const (
@@ -80,7 +79,7 @@ func (status *MetadataStatus) UnmarshalText(text []byte) error {
 // The problems described above are indications dockerapi.DockerClient needs to be moved
 // outside the engine package
 type DockerMetadataClient interface {
-	InspectContainer(context.Context, string, time.Duration) (*docker.Container, error)
+	InspectContainer(context.Context, string, time.Duration) (*types.ContainerJSON, error)
 }
 
 // Network is a struct that keeps track of metadata of a network interface
@@ -106,7 +105,6 @@ type DockerContainerMetadata struct {
 	dockerContainerName string
 	imageID             string
 	imageName           string
-	networkMode         string
 	ports               []apicontainer.PortBinding
 	networkInfo         NetworkMetadata
 }
@@ -131,6 +129,8 @@ type Metadata struct {
 	containerInstanceARN    string
 	metadataStatus          MetadataStatus
 	availabilityZone        string
+	hostPrivateIPv4Address  string
+	hostPublicIPv4Address   string
 }
 
 // metadataSerializer is an intermediate struct that converts the information
@@ -150,6 +150,8 @@ type metadataSerializer struct {
 	Networks               []Network                  `json:"Networks,omitempty"`
 	MetadataFileStatus     MetadataStatus             `json:"MetadataFileStatus,omitempty"`
 	AvailabilityZone       string                     `json:"AvailabilityZone,omitempty"`
+	HostPrivateIPv4Address string                     `json:"HostPrivateIPv4Address,omitempty"`
+	HostPublicIPv4Address  string                     `json:"HostPublicIPv4Address,omitempty"`
 }
 
 func (m Metadata) MarshalJSON() ([]byte, error) {
@@ -169,5 +171,7 @@ func (m Metadata) MarshalJSON() ([]byte, error) {
 			Networks:               m.dockerContainerMetadata.networkInfo.networks,
 			MetadataFileStatus:     m.metadataStatus,
 			AvailabilityZone:       m.availabilityZone,
+			HostPrivateIPv4Address: m.hostPrivateIPv4Address,
+			HostPublicIPv4Address:  m.hostPublicIPv4Address,
 		})
 }

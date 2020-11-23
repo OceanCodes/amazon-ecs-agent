@@ -1,6 +1,6 @@
 // +build !linux,!windows
 
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,6 +19,7 @@ import (
 	"errors"
 
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
+	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/cihub/seelog"
@@ -38,5 +39,17 @@ func (agent *ecsAgent) initializeResourceFields(credentialsManager credentials.M
 }
 
 func (agent *ecsAgent) cgroupInit() error {
+	return nil
+}
+
+func (agent *ecsAgent) initializeGPUManager() error {
+	return nil
+}
+
+func (agent *ecsAgent) getPlatformDevices() []*ecs.PlatformDevice {
+	return nil
+}
+
+func (agent *ecsAgent) loadPauseContainer() error {
 	return nil
 }

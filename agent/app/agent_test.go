@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,41 +19,52 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"sort"
 	"sync"
 	"testing"
 
 	apierrors "github.com/aws/amazon-ecs-agent/agent/api/errors"
-	"github.com/aws/amazon-ecs-agent/agent/api/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/app/factory/mocks"
+	mock_api "github.com/aws/amazon-ecs-agent/agent/api/mocks"
+	mock_factory "github.com/aws/amazon-ecs-agent/agent/app/factory/mocks"
 	app_mocks "github.com/aws/amazon-ecs-agent/agent/app/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/config"
-	"github.com/aws/amazon-ecs-agent/agent/containermetadata/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/credentials/mocks"
+	mock_containermetadata "github.com/aws/amazon-ecs-agent/agent/containermetadata/mocks"
+	mock_credentials "github.com/aws/amazon-ecs-agent/agent/credentials/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
-	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/ec2/mocks"
+	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
+	mock_ec2 "github.com/aws/amazon-ecs-agent/agent/ec2/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
-	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/engine/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
+	mock_dockerstate "github.com/aws/amazon-ecs-agent/agent/engine/dockerstate/mocks"
+	mock_engine "github.com/aws/amazon-ecs-agent/agent/engine/mocks"
+	mock_pause "github.com/aws/amazon-ecs-agent/agent/eni/pause/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers/exitcodes"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/utils/mobypkgwrapper/mocks"
+	mock_statemanager "github.com/aws/amazon-ecs-agent/agent/statemanager/mocks"
+	mock_mobypkgwrapper "github.com/aws/amazon-ecs-agent/agent/utils/mobypkgwrapper/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/version"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	aws_credentials "github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
-	clusterName          = "some-cluster"
-	containerInstanceARN = "container-instance1"
-	availabilityZone     = "us-west-2b"
+	clusterName            = "some-cluster"
+	containerInstanceARN   = "container-instance1"
+	availabilityZone       = "us-west-2b"
+	hostPrivateIPv4Address = "127.0.0.1"
+	hostPublicIPv4Address  = "127.0.0.1"
+	instanceID             = "i-123"
 )
 
 var apiVersions = []dockerclient.DockerVersion{
@@ -97,7 +108,7 @@ func TestDoStartMinimumSupportedDockerVersionTerminal(t *testing.T) {
 	)
 
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
@@ -123,7 +134,7 @@ func TestDoStartMinimumSupportedDockerVersionError(t *testing.T) {
 	)
 
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
@@ -141,77 +152,36 @@ func TestDoStartMinimumSupportedDockerVersionError(t *testing.T) {
 }
 
 func TestDoStartNewTaskEngineError(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, client,
+	ctrl, credentialsManager, _, imageManager, client,
 		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
 	gomock.InOrder(
 		dockerClient.EXPECT().SupportedVersions().Return(apiVersions),
+		saveableOptionFactory.EXPECT().AddSaveable("TaskEngine", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("Cluster", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
+		saveableOptionFactory.EXPECT().AddSaveable("latestSeqNumberTaskManifest", gomock.Any()).Return(nil),
 
 		// An error in creating the state manager should result in an
 		// error from newTaskEngine as well
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(), gomock.Any(),
+		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any()).Return(
 			nil, errors.New("error")),
 	)
 
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
 	agent := &ecsAgent{
 		ctx:                   ctx,
 		cfg:                   &cfg,
-		dockerClient:          dockerClient,
-		stateManagerFactory:   stateManagerFactory,
-		saveableOptionFactory: saveableOptionFactory,
-	}
-
-	exitCode := agent.doStart(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager, client)
-	assert.Equal(t, exitcodes.ExitTerminal, exitCode)
-}
-
-func TestDoStartNewStateManagerError(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, client,
-		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
-	defer ctrl.Finish()
-
-	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
-	expectedInstanceID := "inst-1"
-	gomock.InOrder(
-		dockerClient.EXPECT().SupportedVersions().Return(apiVersions),
-		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("Cluster", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
-			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			statemanager.NewNoopStateManager(), nil),
-		state.EXPECT().AllTasks().AnyTimes(),
-		ec2MetadataClient.EXPECT().InstanceID().Return(expectedInstanceID, nil),
-		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("Cluster", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
-			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			nil, errors.New("error")),
-	)
-
-	cfg := getTestConfig()
-	cfg.Checkpoint = true
-	ctx, cancel := context.WithCancel(context.TODO())
-	// Cancel the context to cancel async routines
-	defer cancel()
-	agent := &ecsAgent{
-		ctx:                   ctx,
-		cfg:                   &cfg,
+		dataClient:            data.NewNoopClient(),
 		dockerClient:          dockerClient,
 		ec2MetadataClient:     ec2MetadataClient,
 		stateManagerFactory:   stateManagerFactory,
@@ -219,7 +189,7 @@ func TestDoStartNewStateManagerError(t *testing.T) {
 	}
 
 	exitCode := agent.doStart(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager, client)
+		credentialsManager, dockerstate.NewTaskEngineState(), imageManager, client)
 	assert.Equal(t, exitcodes.ExitTerminal, exitCode)
 }
 
@@ -230,7 +200,11 @@ func TestDoStartRegisterContainerInstanceErrorTerminal(t *testing.T) {
 
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		dockerClient.EXPECT().SupportedVersions().Return(apiVersions),
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
@@ -239,21 +213,25 @@ func TestDoStartRegisterContainerInstanceErrorTerminal(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{""}, nil),
 		dockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"", "", apierrors.NewAttributeError("error")),
+		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any()).Return("", "", apierrors.NewAttributeError("error")),
 	)
 
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
+
 	cfg := getTestConfig()
-	cfg.TaskCPUMemLimit = config.ExplicitlyDisabled
+	cfg.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
 	agent := &ecsAgent{
 		ctx:                ctx,
 		cfg:                &cfg,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		dockerClient:       dockerClient,
 		mobyPlugins:        mockMobyPlugins,
+		ec2MetadataClient:  mockEC2Metadata,
 	}
 
 	exitCode := agent.doStart(eventstream.NewEventStream("events", ctx),
@@ -266,8 +244,12 @@ func TestDoStartRegisterContainerInstanceErrorNonTerminal(t *testing.T) {
 		dockerClient, _, _ := setup(t)
 	defer ctrl.Finish()
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
-
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		dockerClient.EXPECT().SupportedVersions().Return(apiVersions),
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
@@ -276,9 +258,11 @@ func TestDoStartRegisterContainerInstanceErrorNonTerminal(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{""}, nil),
 		dockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"", "", errors.New("error")),
+		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any()).Return("", "", errors.New("error")),
 	)
+
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	ctx, cancel := context.WithCancel(context.TODO())
@@ -288,8 +272,10 @@ func TestDoStartRegisterContainerInstanceErrorNonTerminal(t *testing.T) {
 		ctx:                ctx,
 		cfg:                &cfg,
 		dockerClient:       dockerClient,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
+		ec2MetadataClient:  mockEC2Metadata,
 	}
 
 	exitCode := agent.doStart(eventstream.NewEventStream("events", ctx),
@@ -297,10 +283,20 @@ func TestDoStartRegisterContainerInstanceErrorNonTerminal(t *testing.T) {
 	assert.Equal(t, exitcodes.ExitError, exitCode)
 }
 
-func TestDoStartRegisterAvailabilityZone(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, client,
-		dockerClient, _, _ := setup(t)
+func TestDoStartHappyPath(t *testing.T) {
+	ctrl, credentialsManager, _, imageManager, client,
+		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
+
+	saveableOptionFactory.EXPECT().AddSaveable(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any()).
+		Return(statemanager.NewNoopStateManager(), nil).AnyTimes()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2MetadataClient.EXPECT().PrivateIPv4Address().Return(hostPrivateIPv4Address, nil)
+	ec2MetadataClient.EXPECT().PublicIPv4Address().Return(hostPublicIPv4Address, nil)
+	ec2MetadataClient.EXPECT().OutpostARN().Return("", nil)
+	ec2MetadataClient.EXPECT().InstanceID().Return(instanceID, nil)
 
 	var discoverEndpointsInvoked sync.WaitGroup
 	discoverEndpointsInvoked.Add(2)
@@ -308,6 +304,10 @@ func TestDoStartRegisterAvailabilityZone(t *testing.T) {
 	dockerClient.EXPECT().Version(gomock.Any(), gomock.Any()).AnyTimes()
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	containermetadata := mock_containermetadata.NewMockManager(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	imageManager.EXPECT().StartImageCleanupProcess(gomock.Any()).MaxTimes(1)
 	dockerClient.EXPECT().ListContainers(gomock.Any(), gomock.Any(), gomock.Any()).Return(
 		dockerapi.ListContainersResponse{}).AnyTimes()
@@ -331,48 +331,80 @@ func TestDoStartRegisterAvailabilityZone(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{""}, nil),
 		dockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"arn:123", availabilityZone, nil),
-		containermetadata.EXPECT().SetContainerInstanceARN("arn:123"),
+		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any()).Return(containerInstanceARN, availabilityZone, nil),
+		containermetadata.EXPECT().SetContainerInstanceARN(containerInstanceARN),
 		containermetadata.EXPECT().SetAvailabilityZone(availabilityZone),
-		imageManager.EXPECT().SetSaver(gomock.Any()),
+		containermetadata.EXPECT().SetHostPrivateIPv4Address(hostPrivateIPv4Address),
+		containermetadata.EXPECT().SetHostPublicIPv4Address(hostPublicIPv4Address),
+		imageManager.EXPECT().SetDataClient(gomock.Any()),
 		dockerClient.EXPECT().ContainerEvents(gomock.Any()),
-		state.EXPECT().AllImageStates().Return(nil),
-		state.EXPECT().AllTasks().Return(nil),
 	)
 
 	cfg := getTestConfig()
-	cfg.ContainerMetadataEnabled = true
+	cfg.ContainerMetadataEnabled = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg.Cluster = clusterName
 	ctx, cancel := context.WithCancel(context.TODO())
 
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
+
 	// Cancel the context to cancel async routines
-	defer cancel()
 	agent := &ecsAgent{
 		ctx:                ctx,
 		cfg:                &cfg,
 		dockerClient:       dockerClient,
+		dataClient:         dataClient,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
 		metadataManager:    containermetadata,
-		terminationHandler: func(saver statemanager.Saver, taskEngine engine.TaskEngine) {},
+		terminationHandler: func(taskEngineState dockerstate.TaskEngineState, dataClient data.Client, taskEngine engine.TaskEngine, cancel context.CancelFunc) {
+		},
+		stateManagerFactory:   stateManagerFactory,
+		ec2MetadataClient:     ec2MetadataClient,
+		saveableOptionFactory: saveableOptionFactory,
 	}
 
-	go agent.doStart(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager, client)
+	var agentW sync.WaitGroup
+	agentW.Add(1)
+	go func() {
+		agent.doStart(eventstream.NewEventStream("events", ctx),
+			credentialsManager, dockerstate.NewTaskEngineState(), imageManager, client)
+		agentW.Done()
+	}()
 
 	discoverEndpointsInvoked.Wait()
+	cancel()
+	agentW.Wait()
+
+	assertMetadata(t, data.AgentVersionKey, version.Version, dataClient)
+	assertMetadata(t, data.AvailabilityZoneKey, availabilityZone, dataClient)
+	assertMetadata(t, data.ClusterNameKey, clusterName, dataClient)
+	assertMetadata(t, data.ContainerInstanceARNKey, containerInstanceARN, dataClient)
+	assertMetadata(t, data.EC2InstanceIDKey, instanceID, dataClient)
+}
+
+func assertMetadata(t *testing.T, key, expectedVal string, dataClient data.Client) {
+	val, err := dataClient.GetMetadata(key)
+	require.NoError(t, err)
+	assert.Equal(t, expectedVal, val)
 }
 
 func TestNewTaskEngineRestoreFromCheckpointNoEC2InstanceIDToLoadHappyPath(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, _,
+	ctrl, credentialsManager, _, imageManager, _,
 		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 
 	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	expectedInstanceID := "inst-1"
 	gomock.InOrder(
+		saveableOptionFactory.EXPECT().AddSaveable("TaskEngine", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Do(
 			func(name string, saveable statemanager.Saveable) {
 				previousContainerInstanceARN, ok := saveable.(*string)
@@ -382,12 +414,16 @@ func TestNewTaskEngineRestoreFromCheckpointNoEC2InstanceIDToLoadHappyPath(t *tes
 		saveableOptionFactory.EXPECT().AddSaveable("Cluster", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
+		saveableOptionFactory.EXPECT().AddSaveable("latestSeqNumberTaskManifest", gomock.Any()).Return(nil),
+
+		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 			statemanager.NewNoopStateManager(), nil),
-		state.EXPECT().AllTasks().AnyTimes(),
 		ec2MetadataClient.EXPECT().InstanceID().Return(expectedInstanceID, nil),
 	)
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
@@ -395,30 +431,35 @@ func TestNewTaskEngineRestoreFromCheckpointNoEC2InstanceIDToLoadHappyPath(t *tes
 	agent := &ecsAgent{
 		ctx:                   ctx,
 		cfg:                   &cfg,
+		dataClient:            dataClient,
 		dockerClient:          dockerClient,
+		pauseLoader:           mockPauseLoader,
 		stateManagerFactory:   stateManagerFactory,
 		ec2MetadataClient:     ec2MetadataClient,
 		saveableOptionFactory: saveableOptionFactory,
 	}
 
 	_, instanceID, err := agent.newTaskEngine(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager)
+		credentialsManager, dockerstate.NewTaskEngineState(), imageManager)
 	assert.NoError(t, err)
 	assert.Equal(t, expectedInstanceID, instanceID)
 	assert.Equal(t, "prev-container-inst", agent.containerInstanceARN)
 }
 
 func TestNewTaskEngineRestoreFromCheckpointPreviousEC2InstanceIDLoadedHappyPath(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, _,
+	ctrl, credentialsManager, _, imageManager, _,
 		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 
 	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	expectedInstanceID := "inst-1"
 
 	gomock.InOrder(
+		saveableOptionFactory.EXPECT().AddSaveable("TaskEngine", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Do(
 			func(name string, saveable statemanager.Saveable) {
 				previousContainerInstanceARN, ok := saveable.(*string)
@@ -438,13 +479,15 @@ func TestNewTaskEngineRestoreFromCheckpointPreviousEC2InstanceIDLoadedHappyPath(
 				assert.True(t, ok)
 				*previousAZ = "us-west-2b"
 			}).Return(nil),
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
+		saveableOptionFactory.EXPECT().AddSaveable("latestSeqNumberTaskManifest", gomock.Any()).Return(nil),
+		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 			statemanager.NewNoopStateManager(), nil),
-		state.EXPECT().AllTasks().AnyTimes(),
 		ec2MetadataClient.EXPECT().InstanceID().Return(expectedInstanceID, nil),
-		state.EXPECT().Reset(),
 	)
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
@@ -452,14 +495,16 @@ func TestNewTaskEngineRestoreFromCheckpointPreviousEC2InstanceIDLoadedHappyPath(
 	agent := &ecsAgent{
 		ctx:                   ctx,
 		cfg:                   &cfg,
+		dataClient:            dataClient,
 		dockerClient:          dockerClient,
+		pauseLoader:           mockPauseLoader,
 		stateManagerFactory:   stateManagerFactory,
 		ec2MetadataClient:     ec2MetadataClient,
 		saveableOptionFactory: saveableOptionFactory,
 	}
 
 	_, instanceID, err := agent.newTaskEngine(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager)
+		credentialsManager, dockerstate.NewTaskEngineState(), imageManager)
 	assert.NoError(t, err)
 	assert.Equal(t, expectedInstanceID, instanceID)
 	assert.NotEqual(t, "prev-container-inst", agent.containerInstanceARN)
@@ -467,17 +512,20 @@ func TestNewTaskEngineRestoreFromCheckpointPreviousEC2InstanceIDLoadedHappyPath(
 }
 
 func TestNewTaskEngineRestoreFromCheckpointClusterIDMismatch(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, _,
+	ctrl, credentialsManager, _, imageManager, _,
 		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 
 	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	cfg.Cluster = "default"
 	ec2InstanceID := "inst-1"
 
 	gomock.InOrder(
+		saveableOptionFactory.EXPECT().AddSaveable("TaskEngine", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Do(
 			func(name string, saveable statemanager.Saveable) {
 				previousContainerInstanceARN, ok := saveable.(*string)
@@ -492,13 +540,16 @@ func TestNewTaskEngineRestoreFromCheckpointClusterIDMismatch(t *testing.T) {
 			}).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
+		saveableOptionFactory.EXPECT().AddSaveable("latestSeqNumberTaskManifest", gomock.Any()).Return(nil),
 
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
+		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 			statemanager.NewNoopStateManager(), nil),
-		state.EXPECT().AllTasks().AnyTimes(),
 		ec2MetadataClient.EXPECT().InstanceID().Return(ec2InstanceID, nil),
 	)
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
@@ -506,34 +557,45 @@ func TestNewTaskEngineRestoreFromCheckpointClusterIDMismatch(t *testing.T) {
 	agent := &ecsAgent{
 		ctx:                   ctx,
 		cfg:                   &cfg,
+		dataClient:            dataClient,
 		dockerClient:          dockerClient,
+		pauseLoader:           mockPauseLoader,
 		stateManagerFactory:   stateManagerFactory,
 		ec2MetadataClient:     ec2MetadataClient,
 		saveableOptionFactory: saveableOptionFactory,
 	}
 
 	_, _, err := agent.newTaskEngine(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager)
+		credentialsManager, dockerstate.NewTaskEngineState(), imageManager)
 	assert.Error(t, err)
-	assert.True(t, isClusterMismatch(err))
+	assert.IsType(t, clusterMismatchError{}, err)
 }
 
 func TestNewTaskEngineRestoreFromCheckpointNewStateManagerError(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, _,
+	ctrl, credentialsManager, _, imageManager, _,
 		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	gomock.InOrder(
+		saveableOptionFactory.EXPECT().AddSaveable("TaskEngine", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("Cluster", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
+		saveableOptionFactory.EXPECT().AddSaveable("latestSeqNumberTaskManifest", gomock.Any()).Return(nil),
+
+		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 			nil, errors.New("error")),
 	)
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
@@ -541,73 +603,46 @@ func TestNewTaskEngineRestoreFromCheckpointNewStateManagerError(t *testing.T) {
 	agent := &ecsAgent{
 		ctx:                   ctx,
 		cfg:                   &cfg,
+		dataClient:            dataClient,
 		dockerClient:          dockerClient,
+		pauseLoader:           mockPauseLoader,
 		stateManagerFactory:   stateManagerFactory,
+		ec2MetadataClient:     ec2MetadataClient,
 		saveableOptionFactory: saveableOptionFactory,
 	}
 
 	_, _, err := agent.newTaskEngine(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager)
+		credentialsManager, dockerstate.NewTaskEngineState(), imageManager)
 	assert.Error(t, err)
 	assert.False(t, isTransient(err))
 }
 
 func TestNewTaskEngineRestoreFromCheckpointStateLoadError(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, _,
+	ctrl, credentialsManager, _, imageManager, _,
 		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 
 	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
 	gomock.InOrder(
+		saveableOptionFactory.EXPECT().AddSaveable("TaskEngine", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("Cluster", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
 		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
+		saveableOptionFactory.EXPECT().AddSaveable("latestSeqNumberTaskManifest", gomock.Any()).Return(nil),
 		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
-			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 		).Return(stateManager, nil),
 		stateManager.EXPECT().Load().Return(errors.New("error")),
 	)
 
-	ctx, cancel := context.WithCancel(context.TODO())
-	// Cancel the context to cancel async routines
-	defer cancel()
-	agent := &ecsAgent{
-		ctx:                   ctx,
-		cfg:                   &cfg,
-		dockerClient:          dockerClient,
-		stateManagerFactory:   stateManagerFactory,
-		saveableOptionFactory: saveableOptionFactory,
-	}
-
-	_, _, err := agent.newTaskEngine(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager)
-	assert.Error(t, err)
-	assert.False(t, isTransient(err))
-}
-
-func TestNewTaskEngineRestoreFromCheckpoint(t *testing.T) {
-	ctrl, credentialsManager, state, imageManager, _,
-		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
-	defer ctrl.Finish()
-
-	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
-	cfg := getTestConfig()
-	cfg.Checkpoint = true
-	expectedInstanceID := "inst-1"
-	gomock.InOrder(
-		saveableOptionFactory.EXPECT().AddSaveable("ContainerInstanceArn", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("Cluster", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("EC2InstanceID", gomock.Any()).Return(nil),
-		saveableOptionFactory.EXPECT().AddSaveable("availabilityZone", gomock.Any()).Return(nil),
-		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(),
-			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-		).Return(statemanager.NewNoopStateManager(), nil),
-		state.EXPECT().AllTasks().AnyTimes(),
-		ec2MetadataClient.EXPECT().InstanceID().Return(expectedInstanceID, nil),
-	)
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
@@ -615,16 +650,67 @@ func TestNewTaskEngineRestoreFromCheckpoint(t *testing.T) {
 	agent := &ecsAgent{
 		ctx:                   ctx,
 		cfg:                   &cfg,
+		dataClient:            dataClient,
 		dockerClient:          dockerClient,
+		pauseLoader:           mockPauseLoader,
 		stateManagerFactory:   stateManagerFactory,
 		ec2MetadataClient:     ec2MetadataClient,
 		saveableOptionFactory: saveableOptionFactory,
 	}
 
+	_, _, err := agent.newTaskEngine(eventstream.NewEventStream("events", ctx),
+		credentialsManager, dockerstate.NewTaskEngineState(), imageManager)
+	assert.Error(t, err)
+	assert.False(t, isTransient(err))
+}
+
+func TestNewTaskEngineRestoreFromCheckpoint(t *testing.T) {
+	ctrl, credentialsManager, _, imageManager, _,
+		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	cfg := getTestConfig()
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg.Cluster = testCluster
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
+	ec2MetadataClient.EXPECT().InstanceID().Return(testEC2InstanceID, nil)
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
+	// Populate boldtb with test data.
+	populateBoltDB(dataClient, t)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	// Cancel the context to cancel async routines
+	defer cancel()
+	agent := &ecsAgent{
+		ctx:                   ctx,
+		cfg:                   &cfg,
+		dataClient:            dataClient,
+		dockerClient:          dockerClient,
+		stateManagerFactory:   stateManagerFactory,
+		ec2MetadataClient:     ec2MetadataClient,
+		pauseLoader:           mockPauseLoader,
+		saveableOptionFactory: saveableOptionFactory,
+	}
+
+	state := dockerstate.NewTaskEngineState()
 	_, instanceID, err := agent.newTaskEngine(eventstream.NewEventStream("events", ctx),
 		credentialsManager, state, imageManager)
 	assert.NoError(t, err)
-	assert.Equal(t, expectedInstanceID, instanceID)
+	assert.Equal(t, testEC2InstanceID, instanceID)
+
+	require.NotNil(t, agent.latestSeqNumberTaskManifest)
+	s := &savedData{
+		availabilityZone:         agent.availabilityZone,
+		cluster:                  cfg.Cluster,
+		containerInstanceARN:     agent.containerInstanceARN,
+		ec2InstanceID:            instanceID,
+		latestTaskManifestSeqNum: *agent.latestSeqNumberTaskManifest,
+	}
+	checkLoadedData(state, s, t)
 }
 
 func TestSetClusterInConfigMismatch(t *testing.T) {
@@ -659,16 +745,30 @@ func TestGetEC2InstanceIDIIDError(t *testing.T) {
 	assert.Equal(t, "", agent.getEC2InstanceID())
 }
 
+func TestGetOupostIDError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	agent := &ecsAgent{ec2MetadataClient: ec2MetadataClient}
+
+	ec2MetadataClient.EXPECT().OutpostARN().Return("", errors.New("error"))
+	assert.Equal(t, "", agent.getoutpostARN())
+}
+
 func TestReregisterContainerInstanceHappyPath(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
 		mockDockerClient.EXPECT().SupportedVersions().Return(nil),
@@ -676,25 +776,30 @@ func TestReregisterContainerInstanceHappyPath(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{""}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(),
-			gomock.Any(), gomock.Any()).Return(containerInstanceARN, availabilityZone, nil),
+		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any(), gomock.Any()).Return(containerInstanceARN, availabilityZone, nil),
 	)
 	cfg := getTestConfig()
 	cfg.Cluster = clusterName
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
+
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
+
 	agent := &ecsAgent{
 		ctx:                ctx,
 		cfg:                &cfg,
 		dockerClient:       mockDockerClient,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
+		ec2MetadataClient:  mockEC2Metadata,
 	}
 	agent.containerInstanceARN = containerInstanceARN
 	agent.availabilityZone = availabilityZone
 
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.NoError(t, err)
 }
 
@@ -703,11 +808,14 @@ func TestReregisterContainerInstanceInstanceTypeChanged(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
 		mockDockerClient.EXPECT().SupportedVersions().Return(nil),
@@ -715,8 +823,9 @@ func TestReregisterContainerInstanceInstanceTypeChanged(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{""}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"", "", awserr.New("", apierrors.InstanceTypeChangedErrorMessage, errors.New(""))),
+		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any()).Return("", "", awserr.New("",
+			apierrors.InstanceTypeChangedErrorMessage, errors.New(""))),
 	)
 
 	cfg := getTestConfig()
@@ -724,17 +833,21 @@ func TestReregisterContainerInstanceInstanceTypeChanged(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
+
 	agent := &ecsAgent{
 		ctx:                ctx,
 		cfg:                &cfg,
 		dockerClient:       mockDockerClient,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
+		ec2MetadataClient:  mockEC2Metadata,
 		mobyPlugins:        mockMobyPlugins,
 	}
 	agent.containerInstanceARN = containerInstanceARN
 	agent.availabilityZone = availabilityZone
 
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.Error(t, err)
 	assert.False(t, isTransient(err))
 }
@@ -744,10 +857,14 @@ func TestReregisterContainerInstanceAttributeError(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
@@ -756,9 +873,10 @@ func TestReregisterContainerInstanceAttributeError(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"", "", apierrors.NewAttributeError("error")),
+		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any()).Return("", "", apierrors.NewAttributeError("error")),
 	)
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	cfg.Cluster = clusterName
@@ -768,14 +886,16 @@ func TestReregisterContainerInstanceAttributeError(t *testing.T) {
 	agent := &ecsAgent{
 		ctx:                ctx,
 		cfg:                &cfg,
+		ec2MetadataClient:  mockEC2Metadata,
 		dockerClient:       mockDockerClient,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
 	}
 	agent.containerInstanceARN = containerInstanceARN
 	agent.availabilityZone = availabilityZone
 
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.Error(t, err)
 	assert.False(t, isTransient(err))
 }
@@ -785,11 +905,14 @@ func TestReregisterContainerInstanceNonTerminalError(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
 		mockDockerClient.EXPECT().SupportedVersions().Return(nil),
@@ -797,9 +920,10 @@ func TestReregisterContainerInstanceNonTerminalError(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"", "", errors.New("error")),
+		client.EXPECT().RegisterContainerInstance(containerInstanceARN, gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any()).Return("", "", errors.New("error")),
 	)
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	cfg.Cluster = clusterName
@@ -810,13 +934,15 @@ func TestReregisterContainerInstanceNonTerminalError(t *testing.T) {
 		ctx:                ctx,
 		cfg:                &cfg,
 		dockerClient:       mockDockerClient,
+		ec2MetadataClient:  mockEC2Metadata,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
 	}
 	agent.containerInstanceARN = containerInstanceARN
 	agent.availabilityZone = availabilityZone
 
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.Error(t, err)
 	assert.True(t, isTransient(err))
 }
@@ -826,11 +952,15 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetHappyPath(t *t
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
 
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
+
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
 		mockDockerClient.EXPECT().SupportedVersions().Return(nil),
@@ -838,9 +968,10 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetHappyPath(t *t
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any()).Return(containerInstanceARN, availabilityZone, nil),
-		stateManager.EXPECT().Save(),
+		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any()).Return(containerInstanceARN, availabilityZone, nil),
 	)
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	cfg.Cluster = clusterName
@@ -851,10 +982,12 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetHappyPath(t *t
 		ctx:                ctx,
 		cfg:                &cfg,
 		dockerClient:       mockDockerClient,
+		ec2MetadataClient:  mockEC2Metadata,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
 	}
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, containerInstanceARN, agent.containerInstanceARN)
 	assert.Equal(t, availabilityZone, agent.availabilityZone)
@@ -865,11 +998,14 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetCanRetryError(
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	retriableError := apierrors.NewRetriableError(apierrors.NewRetriable(true), errors.New("error"))
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
@@ -878,8 +1014,10 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetCanRetryError(
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any()).Return("", "", retriableError),
+		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any()).Return("", "", retriableError),
 	)
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	cfg.Cluster = clusterName
@@ -890,11 +1028,13 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetCanRetryError(
 		ctx:                ctx,
 		cfg:                &cfg,
 		dockerClient:       mockDockerClient,
+		ec2MetadataClient:  mockEC2Metadata,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
 	}
 
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.Error(t, err)
 	assert.True(t, isTransient(err))
 }
@@ -904,11 +1044,14 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetCannotRetryErr
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	cannotRetryError := apierrors.NewRetriableError(apierrors.NewRetriable(false), errors.New("error"))
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
@@ -917,8 +1060,10 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetCannotRetryErr
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any()).Return("", "", cannotRetryError),
+		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any()).Return("", "", cannotRetryError),
 	)
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	cfg.Cluster = clusterName
@@ -928,12 +1073,14 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetCannotRetryErr
 	agent := &ecsAgent{
 		ctx:                ctx,
 		cfg:                &cfg,
+		ec2MetadataClient:  mockEC2Metadata,
 		dockerClient:       mockDockerClient,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
 	}
 
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.Error(t, err)
 	assert.False(t, isTransient(err))
 }
@@ -943,11 +1090,14 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetAttributeError
 	defer ctrl.Finish()
 
 	mockDockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 	client := mock_api.NewMockECSClient(ctrl)
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
 		mockDockerClient.EXPECT().SupportedVersions().Return(nil),
@@ -955,9 +1105,10 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetAttributeError
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{}, nil),
 		mockDockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"", "", apierrors.NewAttributeError("error")),
+		client.EXPECT().RegisterContainerInstance("", gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any()).Return("", "", apierrors.NewAttributeError("error")),
 	)
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	cfg.Cluster = clusterName
@@ -967,12 +1118,14 @@ func TestRegisterContainerInstanceWhenContainerInstanceARNIsNotSetAttributeError
 	agent := &ecsAgent{
 		ctx:                ctx,
 		cfg:                &cfg,
+		ec2MetadataClient:  mockEC2Metadata,
 		dockerClient:       mockDockerClient,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		mobyPlugins:        mockMobyPlugins,
 	}
 
-	err := agent.registerContainerInstance(stateManager, client, nil)
+	err := agent.registerContainerInstance(client, nil)
 	assert.Error(t, err)
 	assert.False(t, isTransient(err))
 }
@@ -984,7 +1137,11 @@ func TestRegisterContainerInstanceInvalidParameterTerminalError(t *testing.T) {
 
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
+	mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
+	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, nil).AnyTimes()
+	mockPauseLoader.EXPECT().LoadImage(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	gomock.InOrder(
 		dockerClient.EXPECT().SupportedVersions().Return(apiVersions),
 		mockCredentialsProvider.EXPECT().Retrieve().Return(aws_credentials.Value{}, nil),
@@ -993,9 +1150,10 @@ func TestRegisterContainerInstanceInvalidParameterTerminalError(t *testing.T) {
 		mockMobyPlugins.EXPECT().Scan().AnyTimes().Return([]string{}, nil),
 		dockerClient.EXPECT().ListPluginsWithFilters(gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any()).AnyTimes().Return([]string{}, nil),
-		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
-			"", "", awserr.New("InvalidParameterException", "", nil)),
+		client.EXPECT().RegisterContainerInstance(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any()).Return("", "", awserr.New("InvalidParameterException", "", nil)),
 	)
+	mockEC2Metadata.EXPECT().OutpostARN().Return("", nil)
 
 	cfg := getTestConfig()
 	ctx, cancel := context.WithCancel(context.TODO())
@@ -1003,7 +1161,9 @@ func TestRegisterContainerInstanceInvalidParameterTerminalError(t *testing.T) {
 	defer cancel()
 	agent := &ecsAgent{
 		ctx:                ctx,
+		ec2MetadataClient:  mockEC2Metadata,
 		cfg:                &cfg,
+		pauseLoader:        mockPauseLoader,
 		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
 		dockerClient:       dockerClient,
 		mobyPlugins:        mockMobyPlugins,
@@ -1109,8 +1269,179 @@ func TestGetContainerInstanceTagsFromEC2APIFailToDescribeECSTagsForInstance(t *t
 	assert.Nil(t, resTags)
 }
 
+func TestGetHostPrivateIPv4AddressFromEC2Metadata(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2Client := mock_ec2.NewMockClient(ctrl)
+
+	agent := &ecsAgent{
+		ec2MetadataClient: ec2MetadataClient,
+		ec2Client:         ec2Client,
+	}
+	ec2MetadataClient.EXPECT().PrivateIPv4Address().Return(hostPrivateIPv4Address, nil)
+
+	assert.Equal(t, hostPrivateIPv4Address, agent.getHostPrivateIPv4AddressFromEC2Metadata())
+}
+
+func TestGetHostPrivateIPv4AddressFromEC2MetadataFailWithError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2Client := mock_ec2.NewMockClient(ctrl)
+
+	agent := &ecsAgent{
+		ec2MetadataClient: ec2MetadataClient,
+		ec2Client:         ec2Client,
+	}
+	ec2MetadataClient.EXPECT().PrivateIPv4Address().Return("", errors.New("Unable to get IP Address"))
+
+	assert.Empty(t, agent.getHostPrivateIPv4AddressFromEC2Metadata())
+}
+
+func TestGetHostPublicIPv4AddressFromEC2Metadata(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2Client := mock_ec2.NewMockClient(ctrl)
+
+	agent := &ecsAgent{
+		ec2MetadataClient: ec2MetadataClient,
+		ec2Client:         ec2Client,
+	}
+	ec2MetadataClient.EXPECT().PublicIPv4Address().Return(hostPublicIPv4Address, nil)
+
+	assert.Equal(t, hostPublicIPv4Address, agent.getHostPublicIPv4AddressFromEC2Metadata())
+}
+
+func TestGetHostPublicIPv4AddressFromEC2MetadataFailWithError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2Client := mock_ec2.NewMockClient(ctrl)
+
+	agent := &ecsAgent{
+		ec2MetadataClient: ec2MetadataClient,
+		ec2Client:         ec2Client,
+	}
+	ec2MetadataClient.EXPECT().PublicIPv4Address().Return("", errors.New("Unable to get IP Address"))
+
+	assert.Empty(t, agent.getHostPublicIPv4AddressFromEC2Metadata())
+}
+
+func TestSpotInstanceActionCheck_Sunny(t *testing.T) {
+	tests := []struct {
+		jsonresp string
+	}{
+		{jsonresp: `{"action": "terminate", "time": "2017-09-18T08:22:00Z"}`},
+		{jsonresp: `{"action": "hibernate", "time": "2017-09-18T08:22:00Z"}`},
+		{jsonresp: `{"action": "stop", "time": "2017-09-18T08:22:00Z"}`},
+	}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2Client := mock_ec2.NewMockClient(ctrl)
+	ecsClient := mock_api.NewMockECSClient(ctrl)
+
+	for _, test := range tests {
+		myARN := "myARN"
+		agent := &ecsAgent{
+			ec2MetadataClient:    ec2MetadataClient,
+			ec2Client:            ec2Client,
+			containerInstanceARN: myARN,
+		}
+		ec2MetadataClient.EXPECT().SpotInstanceAction().Return(test.jsonresp, nil)
+		ecsClient.EXPECT().UpdateContainerInstancesState(myARN, "DRAINING").Return(nil)
+
+		assert.True(t, agent.spotInstanceDrainingPoller(ecsClient))
+	}
+}
+
+func TestSpotInstanceActionCheck_Fail(t *testing.T) {
+	tests := []struct {
+		jsonresp string
+	}{
+		{jsonresp: `{"action": "terminate" "time": "2017-09-18T08:22:00Z"}`}, // invalid json
+		{jsonresp: ``}, // empty json
+		{jsonresp: `{"action": "flip!", "time": "2017-09-18T08:22:00Z"}`}, // invalid action
+	}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2Client := mock_ec2.NewMockClient(ctrl)
+	ecsClient := mock_api.NewMockECSClient(ctrl)
+
+	for _, test := range tests {
+		myARN := "myARN"
+		agent := &ecsAgent{
+			ec2MetadataClient:    ec2MetadataClient,
+			ec2Client:            ec2Client,
+			containerInstanceARN: myARN,
+		}
+		ec2MetadataClient.EXPECT().SpotInstanceAction().Return(test.jsonresp, nil)
+		// Container state should NOT be updated because the termination time field is empty.
+		ecsClient.EXPECT().UpdateContainerInstancesState(gomock.Any(), gomock.Any()).Times(0)
+
+		assert.False(t, agent.spotInstanceDrainingPoller(ecsClient))
+	}
+}
+
+func TestSpotInstanceActionCheck_NoInstanceActionYet(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ec2MetadataClient := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	ec2Client := mock_ec2.NewMockClient(ctrl)
+	ecsClient := mock_api.NewMockECSClient(ctrl)
+
+	myARN := "myARN"
+	agent := &ecsAgent{
+		ec2MetadataClient:    ec2MetadataClient,
+		ec2Client:            ec2Client,
+		containerInstanceARN: myARN,
+	}
+	ec2MetadataClient.EXPECT().SpotInstanceAction().Return("", fmt.Errorf("404"))
+
+	// Container state should NOT be updated because there is no termination time.
+	ecsClient.EXPECT().UpdateContainerInstancesState(gomock.Any(), gomock.Any()).Times(0)
+
+	assert.False(t, agent.spotInstanceDrainingPoller(ecsClient))
+}
+
+func TestSaveMetadata(t *testing.T) {
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
+
+	agent := &ecsAgent{
+		dataClient: dataClient,
+	}
+	agent.saveMetadata(data.AvailabilityZoneKey, availabilityZone)
+	az, err := dataClient.GetMetadata(data.AvailabilityZoneKey)
+	require.NoError(t, err)
+	assert.Equal(t, availabilityZone, az)
+}
+
 func getTestConfig() config.Config {
 	cfg := config.DefaultConfig()
-	cfg.TaskCPUMemLimit = config.ExplicitlyDisabled
+	cfg.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 	return cfg
+}
+
+func newTestDataClient(t *testing.T) (data.Client, func()) {
+	testDir, err := ioutil.TempDir("", "agent_app_unit_test")
+	require.NoError(t, err)
+
+	testClient, err := data.NewWithSetup(testDir)
+
+	cleanup := func() {
+		require.NoError(t, testClient.Close())
+		require.NoError(t, os.RemoveAll(testDir))
+	}
+	return testClient, cleanup
 }

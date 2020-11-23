@@ -1,4 +1,4 @@
-# Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You may
 # not use this file except in compliance with the License. A copy of the
@@ -99,6 +99,7 @@ Import-Module AWSPowerShell
 
 echo "Pulling microsoft/windowsservercore:latest..."
 docker pull microsoft/windowsservercore:latest
+docker tag microsoft/windowsservercore:latest amazon-ecs-ftest-windows-base:make
 
 $ENV:ECS_WINDOWS_TEST_DIR="${BUILD_ROOT}"
 $ENV:ECS_FTEST_TMP="${WORK_ROOT}\ftest_temp"

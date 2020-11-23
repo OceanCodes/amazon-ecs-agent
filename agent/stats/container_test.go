@@ -1,6 +1,6 @@
 //+build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,19 +16,19 @@
 package stats
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"testing"
 	"time"
 
-	"context"
-
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
-	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
+	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
 	mock_resolver "github.com/aws/amazon-ecs-agent/agent/stats/resolver/mock"
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
 	"github.com/golang/mock/gomock"
 )
 
@@ -56,12 +56,13 @@ func TestContainerStatsCollection(t *testing.T) {
 
 	dockerID := "container1"
 	ctx, cancel := context.WithCancel(context.TODO())
-	statChan := make(chan *docker.Stats)
-	mockDockerClient.EXPECT().Stats(dockerID, ctx).Return(statChan, nil)
+	statChan := make(chan *types.StatsJSON)
+	errC := make(chan error)
+	mockDockerClient.EXPECT().Stats(ctx, dockerID, dockerclient.StatsInactivityTimeout).Return(statChan, errC)
 	go func() {
 		for _, stat := range statsData {
 			// doing this with json makes me sad, but is the easiest way to
-			// deal with the docker.Stats.MemoryStats inner struct
+			// deal with the types.StatsJSON.MemoryStats inner struct
 			jsonStat := fmt.Sprintf(`
 				{
 					"memory_stats": {"usage":%d, "privateworkingset":%d},
@@ -72,7 +73,7 @@ func TestContainerStatsCollection(t *testing.T) {
 						}
 					}
 				}`, stat.memBytes, stat.memBytes, stat.cpuTime, stat.cpuTime)
-			dockerStat := &docker.Stats{}
+			dockerStat := &types.StatsJSON{}
 			json.Unmarshal([]byte(jsonStat), dockerStat)
 			dockerStat.Read = stat.timestamp
 			statChan <- dockerStat
@@ -134,9 +135,10 @@ func TestContainerStatsCollectionReconnection(t *testing.T) {
 	dockerID := "container1"
 	ctx, cancel := context.WithCancel(context.TODO())
 
-	statChan := make(chan *docker.Stats)
-	statErr := fmt.Errorf("test error")
-	closedChan := make(chan *docker.Stats)
+	statChan := make(chan *types.StatsJSON)
+	errChan := make(chan error)
+	go func() { errChan <- fmt.Errorf("test error") }()
+	closedChan := make(chan *types.StatsJSON)
 	close(closedChan)
 
 	mockContainer := &apicontainer.DockerContainer{
@@ -146,11 +148,11 @@ func TestContainerStatsCollectionReconnection(t *testing.T) {
 		},
 	}
 	gomock.InOrder(
-		mockDockerClient.EXPECT().Stats(dockerID, ctx).Return(nil, statErr),
+		mockDockerClient.EXPECT().Stats(ctx, dockerID, dockerclient.StatsInactivityTimeout).Return(closedChan, errChan),
 		resolver.EXPECT().ResolveContainer(dockerID).Return(mockContainer, nil),
-		mockDockerClient.EXPECT().Stats(dockerID, ctx).Return(closedChan, nil),
+		mockDockerClient.EXPECT().Stats(ctx, dockerID, dockerclient.StatsInactivityTimeout).Return(closedChan, nil),
 		resolver.EXPECT().ResolveContainer(dockerID).Return(mockContainer, nil),
-		mockDockerClient.EXPECT().Stats(dockerID, ctx).Return(statChan, nil),
+		mockDockerClient.EXPECT().Stats(ctx, dockerID, dockerclient.StatsInactivityTimeout).Return(statChan, nil),
 	)
 
 	container := &StatsContainer{
@@ -176,8 +178,9 @@ func TestContainerStatsCollectionStopsIfContainerIsTerminal(t *testing.T) {
 	dockerID := "container1"
 	ctx, cancel := context.WithCancel(context.TODO())
 
-	closedChan := make(chan *docker.Stats)
+	closedChan := make(chan *types.StatsJSON)
 	close(closedChan)
+	errC := make(chan error)
 
 	statsErr := fmt.Errorf("test error")
 	mockContainer := &apicontainer.DockerContainer{
@@ -187,7 +190,7 @@ func TestContainerStatsCollectionStopsIfContainerIsTerminal(t *testing.T) {
 		},
 	}
 	gomock.InOrder(
-		mockDockerClient.EXPECT().Stats(dockerID, ctx).Return(closedChan, nil),
+		mockDockerClient.EXPECT().Stats(ctx, dockerID, dockerclient.StatsInactivityTimeout).Return(closedChan, errC),
 		resolver.EXPECT().ResolveContainer(dockerID).Return(mockContainer, statsErr),
 	)
 

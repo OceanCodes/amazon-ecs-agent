@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -29,13 +29,13 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/stats"
-	"github.com/aws/amazon-ecs-agent/agent/stats/mock"
+	mock_stats "github.com/aws/amazon-ecs-agent/agent/stats/mock"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
-	"github.com/aws/amazon-ecs-agent/agent/wsclient/wsconn/mock"
+	mock_wsconn "github.com/aws/amazon-ecs-agent/agent/wsclient/wsconn/mock"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
@@ -56,8 +56,8 @@ func (*mockStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs
 	return nil, nil, fmt.Errorf("uninitialized")
 }
 
-func (*mockStatsEngine) ContainerDockerStats(taskARN string, id string) (*docker.Stats, error) {
-	return nil, fmt.Errorf("not implemented")
+func (*mockStatsEngine) ContainerDockerStats(taskARN string, id string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error) {
+	return nil, nil, fmt.Errorf("not implemented")
 }
 
 func (*mockStatsEngine) GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error) {
@@ -70,8 +70,8 @@ func (*emptyStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstc
 	return nil, nil, fmt.Errorf("empty stats")
 }
 
-func (*emptyStatsEngine) ContainerDockerStats(taskARN string, id string) (*docker.Stats, error) {
-	return nil, fmt.Errorf("not implemented")
+func (*emptyStatsEngine) ContainerDockerStats(taskARN string, id string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error) {
+	return nil, nil, fmt.Errorf("not implemented")
 }
 
 func (*emptyStatsEngine) GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error) {
@@ -90,8 +90,8 @@ func (*idleStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs
 	return metadata, []*ecstcs.TaskMetric{}, nil
 }
 
-func (*idleStatsEngine) ContainerDockerStats(taskARN string, id string) (*docker.Stats, error) {
-	return nil, fmt.Errorf("not implemented")
+func (*idleStatsEngine) ContainerDockerStats(taskARN string, id string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error) {
+	return nil, nil, fmt.Errorf("not implemented")
 }
 
 func (*idleStatsEngine) GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error) {
@@ -118,8 +118,8 @@ func (engine *nonIdleStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata,
 	return metadata, taskMetrics, nil
 }
 
-func (*nonIdleStatsEngine) ContainerDockerStats(taskARN string, id string) (*docker.Stats, error) {
-	return nil, fmt.Errorf("not implemented")
+func (*nonIdleStatsEngine) ContainerDockerStats(taskARN string, id string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error) {
+	return nil, nil, fmt.Errorf("not implemented")
 }
 
 func (*nonIdleStatsEngine) GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error) {

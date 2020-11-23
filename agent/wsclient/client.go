@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -33,16 +33,17 @@ import (
 	"sync"
 	"time"
 
+	"crypto/tls"
+
 	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/aws/amazon-ecs-agent/agent/utils/cipher"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient/wsconn"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/private/protocol/json/jsonutil"
 	"github.com/cihub/seelog"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
-	"github.com/aws/amazon-ecs-agent/agent/utils/cipher"
-	"crypto/tls"
-	"github.com/aws/amazon-ecs-agent/agent/utils"
 )
 
 const (
@@ -386,7 +387,7 @@ func (cs *ClientServerImpl) ConsumeMessages() error {
 
 		default:
 			// Unexpected error occurred
-			seelog.Errorf("Error getting message from ws backend: error: [%v], messageType: [%v] ",
+			seelog.Debugf("Error getting message from ws backend: error: [%v], messageType: [%v] ",
 				err, messageType)
 			return err
 		}
@@ -441,7 +442,7 @@ func (cs *ClientServerImpl) handleMessage(data []byte) {
 	if handler, ok := cs.RequestHandlers[typeStr]; ok {
 		reflect.ValueOf(handler).Call([]reflect.Value{reflect.ValueOf(typedMessage)})
 	} else {
-		seelog.Infof("No handler for message type: %s", typeStr)
+		seelog.Infof("No handler for message type: %s %s", typeStr, typedMessage)
 	}
 }
 

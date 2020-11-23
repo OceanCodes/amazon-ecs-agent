@@ -1,6 +1,6 @@
 // +build linux
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -17,23 +17,25 @@ package app
 
 import (
 	"fmt"
-	"net/http"
+	"os"
 
 	asmfactory "github.com/aws/amazon-ecs-agent/agent/asm/factory"
-	ssmfactory "github.com/aws/amazon-ecs-agent/agent/ssm/factory"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
-	"github.com/aws/amazon-ecs-agent/agent/ec2"
+	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
-	"github.com/aws/amazon-ecs-agent/agent/eni/pause"
 	"github.com/aws/amazon-ecs-agent/agent/eni/udevwrapper"
 	"github.com/aws/amazon-ecs-agent/agent/eni/watcher"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
+	ssmfactory "github.com/aws/amazon-ecs-agent/agent/ssm/factory"
+
 	"github.com/aws/amazon-ecs-agent/agent/statechange"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	cgroup "github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup/control"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ioutilwrapper"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/cihub/seelog"
 	"github.com/pkg/errors"
 )
@@ -46,6 +48,8 @@ const initPID = 1
 var awsVPCCNIPlugins = []string{ecscni.ECSENIPluginName,
 	ecscni.ECSBridgePluginName,
 	ecscni.ECSIPAMPluginName,
+	ecscni.ECSAppMeshPluginName,
+	ecscni.ECSBranchENIPluginName,
 }
 
 // startWindowsService is not supported on Linux
@@ -54,15 +58,17 @@ func (agent *ecsAgent) startWindowsService() int {
 	return 1
 }
 
+var getPid = os.Getpid
+
 // initializeTaskENIDependencies initializes all of the dependencies required by
 // the Agent to support the 'awsvpc' networking mode. A non nil error is returned
 // if an error is encountered during this process. An additional boolean flag to
 // indicate if this error is considered terminal is also returned
 func (agent *ecsAgent) initializeTaskENIDependencies(state dockerstate.TaskEngineState, taskEngine engine.TaskEngine) (error, bool) {
 	// Check if the Agent process's pid  == 1, which means it's running without an init system
-	if agent.os.Getpid() == initPID {
+	if getPid() == initPID {
 		// This is a terminal error. Bad things happen with invoking the
-		// the ENI plugin when there's no init process in the pid namesapce.
+		// the ENI plugin when there's no init process in the pid namespace.
 		// Specifically, the DHClient processes that are started as children
 		// of the Agent will not be reaped leading to the ENI device
 		// disappearing until the Agent is killed.
@@ -80,17 +86,6 @@ func (agent *ecsAgent) initializeTaskENIDependencies(state dockerstate.TaskEngin
 		// An error here is terminal as it means that the plugins
 		// do not support the ENI capability
 		return err, true
-	}
-
-	// Load the pause container's image from the 'disk'
-	if _, err := agent.pauseLoader.LoadImage(agent.ctx, agent.cfg, agent.dockerClient); err != nil {
-		if pause.IsNoSuchFileError(err) || pause.UnsupportedPlatform(err) {
-			// If the pause container's image tarball doesn't exist or if the
-			// invocation is done for an unsupported platform, we cannot recover.
-			// Return the error as terminal for these cases
-			return err, true
-		}
-		return err, false
 	}
 
 	if err := agent.startUdevWatcher(state, taskEngine.StateChangeEvents()); err != nil {
@@ -129,14 +124,13 @@ func (agent *ecsAgent) setVPCSubnet() (error, bool) {
 	return nil, false
 }
 
-// isInstanceLaunchedInVPC returns false when the http status code is set to
-// 'not found' (404) when querying the vpc id from instance metadata
+// isInstanceLaunchedInVPC returns false when the awserr returned is an EC2MetadataError
+// when querying the vpc id from instance metadata
 func isInstanceLaunchedInVPC(err error) bool {
-	if metadataErr, ok := err.(*ec2.MetadataError); ok &&
-		metadataErr.GetStatusCode() == http.StatusNotFound {
+	if aerr, ok := err.(awserr.Error); ok &&
+		aerr.Code() == "EC2MetadataError" {
 		return false
 	}
-
 	return true
 }
 
@@ -146,12 +140,23 @@ func isInstanceLaunchedInVPC(err error) bool {
 // a. ecs-eni
 // b. ecs-bridge
 // c. ecs-ipam
+// d. aws-appmesh
+// e. vpc-branch-eni
 func (agent *ecsAgent) verifyCNIPluginsCapabilities() error {
 	// Check if we can get capabilities from each plugin
 	for _, plugin := range awsVPCCNIPlugins {
+		// skip verifying branch cni plugin if eni trunking is not enabled
+		if plugin == ecscni.ECSBranchENIPluginName && agent.cfg != nil && !agent.cfg.ENITrunkingEnabled.Enabled() {
+			continue
+		}
+
 		capabilities, err := agent.cniClient.Capabilities(plugin)
 		if err != nil {
 			return err
+		}
+		// appmesh plugin is not needed for awsvpc networking capability
+		if plugin == ecscni.ECSAppMeshPluginName {
+			continue
 		}
 		if !contains(capabilities, ecscni.CapabilityAWSVPCNetworkingMode) {
 			return errors.Errorf("plugin '%s' doesn't support the capability: %s",
@@ -166,16 +171,20 @@ func (agent *ecsAgent) verifyCNIPluginsCapabilities() error {
 // notifications from the monitor
 func (agent *ecsAgent) startUdevWatcher(state dockerstate.TaskEngineState, stateChangeEvents chan<- statechange.Event) error {
 	seelog.Debug("Setting up ENI Watcher")
-	udevMonitor, err := udevwrapper.New()
-	if err != nil {
-		return errors.Wrapf(err, "unable to create udev monitor")
+	if agent.udevMonitor == nil {
+		monitor, err := udevwrapper.New()
+		if err != nil {
+			return errors.Wrapf(err, "unable to create udev monitor")
+		}
+		agent.udevMonitor = monitor
+
+		// Create Watcher
+		eniWatcher := watcher.New(agent.ctx, agent.mac, agent.udevMonitor, state, stateChangeEvents)
+		if err := eniWatcher.Init(); err != nil {
+			return errors.Wrapf(err, "unable to initialize eni watcher")
+		}
+		go eniWatcher.Start()
 	}
-	// Create Watcher
-	eniWatcher := watcher.New(agent.ctx, agent.mac, udevMonitor, state, stateChangeEvents)
-	if err := eniWatcher.Init(); err != nil {
-		return errors.Wrapf(err, "unable to initialize eni watcher")
-	}
-	go eniWatcher.Start()
 	return nil
 }
 
@@ -199,9 +208,11 @@ func (agent *ecsAgent) initializeResourceFields(credentialsManager credentials.M
 			ASMClientCreator:   asmfactory.NewClientCreator(),
 			SSMClientCreator:   ssmfactory.NewSSMClientCreator(),
 			CredentialsManager: credentialsManager,
+			EC2InstanceID:      agent.getEC2InstanceID(),
 		},
-		Ctx:          agent.ctx,
-		DockerClient: agent.dockerClient,
+		Ctx:              agent.ctx,
+		DockerClient:     agent.dockerClient,
+		NvidiaGPUManager: gpu.NewNvidiaGPUManager(),
 	}
 }
 
@@ -212,10 +223,33 @@ func (agent *ecsAgent) cgroupInit() error {
 	if err == nil {
 		return nil
 	}
-	if agent.cfg.TaskCPUMemLimit == config.ExplicitlyEnabled {
+	if agent.cfg.TaskCPUMemLimit.Value == config.ExplicitlyEnabled {
 		return errors.Wrapf(err, "unable to setup '/ecs' cgroup")
 	}
 	seelog.Warnf("Disabling TaskCPUMemLimit because agent is unabled to setup '/ecs' cgroup: %v", err)
-	agent.cfg.TaskCPUMemLimit = config.ExplicitlyDisabled
+	agent.cfg.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 	return nil
+}
+
+func (agent *ecsAgent) initializeGPUManager() error {
+	if agent.resourceFields != nil && agent.resourceFields.NvidiaGPUManager != nil {
+		return agent.resourceFields.NvidiaGPUManager.Initialize()
+	}
+	return nil
+}
+
+func (agent *ecsAgent) getPlatformDevices() []*ecs.PlatformDevice {
+	if agent.cfg.GPUSupportEnabled {
+		if agent.resourceFields != nil && agent.resourceFields.NvidiaGPUManager != nil {
+			return agent.resourceFields.NvidiaGPUManager.GetDevices()
+		}
+	}
+	return nil
+}
+
+func (agent *ecsAgent) loadPauseContainer() error {
+	// Load the pause container's image from the 'disk'
+	_, err := agent.pauseLoader.LoadImage(agent.ctx, agent.cfg, agent.dockerClient)
+
+	return err
 }

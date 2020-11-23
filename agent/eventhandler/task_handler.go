@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -23,11 +23,13 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
+	"github.com/aws/amazon-ecs-agent/agent/metrics"
 	"github.com/aws/amazon-ecs-agent/agent/statechange"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/aws/amazon-ecs-agent/agent/utils/retry"
 	"github.com/cihub/seelog"
 )
 
@@ -63,9 +65,9 @@ type TaskHandler struct {
 	// * tasksToContainerStates
 	lock sync.RWMutex
 
-	// stateSaver is a statemanager which may be used to save any
-	// changes to a task or container's SentStatus
-	stateSaver statemanager.Saver
+	// dataClient is used to save changes to database, mainly to save
+	// changes of a task or container's SentStatus.
+	dataClient data.Client
 
 	// min and max drain events frequency refer to the range of
 	// time over which a call to SubmitTaskStateChange is made.
@@ -98,7 +100,7 @@ type taskSendableEvents struct {
 
 // NewTaskHandler returns a pointer to TaskHandler
 func NewTaskHandler(ctx context.Context,
-	stateManager statemanager.Saver,
+	dataClient data.Client,
 	state dockerstate.TaskEngineState,
 	client api.ECSClient) *TaskHandler {
 	// Create a handler and start the periodic event drain loop
@@ -107,7 +109,7 @@ func NewTaskHandler(ctx context.Context,
 		tasksToEvents:           make(map[string]*taskSendableEvents),
 		submitSemaphore:         utils.NewSemaphore(concurrentEventCalls),
 		tasksToContainerStates:  make(map[string][]api.ContainerStateChange),
-		stateSaver:              stateManager,
+		dataClient:              dataClient,
 		state:                   state,
 		client:                  client,
 		minDrainEventsFrequency: minDrainEventsFrequency,
@@ -156,7 +158,8 @@ func (handler *TaskHandler) AddStateChangeEvent(change statechange.Event, client
 // startDrainEventsTicker starts a ticker that periodically drains the events queue
 // by submitting state change events to the ECS backend
 func (handler *TaskHandler) startDrainEventsTicker() {
-	derivedCtx, _ := context.WithCancel(handler.ctx)
+	derivedCtx, cancel := context.WithCancel(handler.ctx)
+	defer cancel()
 	ticker := utils.NewJitteredTicker(derivedCtx, handler.minDrainEventsFrequency, handler.maxDrainEventsFrequency)
 	for {
 		select {
@@ -267,9 +270,10 @@ func (handler *TaskHandler) getTaskEventsUnsafe(event *sendableEvent) *taskSenda
 // Continuously retries sending an event until it succeeds, sleeping between each
 // attempt
 func (handler *TaskHandler) submitTaskEvents(taskEvents *taskSendableEvents, client api.ECSClient, taskARN string) {
+	defer metrics.MetricsEngineGlobal.RecordECSClientMetric("SUBMIT_TASK_EVENTS")()
 	defer handler.removeTaskEvents(taskARN)
 
-	backoff := utils.NewSimpleBackoff(submitStateBackoffMin, submitStateBackoffMax,
+	backoff := retry.NewExponentialBackoff(submitStateBackoffMin, submitStateBackoffMax,
 		submitStateBackoffJitterMultiple, submitStateBackoffMultiple)
 
 	// Mirror events.sending, but without the need to lock since this is local
@@ -280,7 +284,7 @@ func (handler *TaskHandler) submitTaskEvents(taskEvents *taskSendableEvents, cli
 		// If we looped back up here, we successfully submitted an event, but
 		// we haven't emptied the list so we should keep submitting
 		backoff.Reset()
-		utils.RetryWithBackoff(backoff, func() error {
+		retry.RetryWithBackoff(backoff, func() error {
 			// Lock and unlock within this function, allowing the list to be added
 			// to while we're not actively sending an event
 			seelog.Debug("TaskHandler: Waiting on semaphore to send events...")
@@ -332,7 +336,7 @@ func (taskEvents *taskSendableEvents) sendChange(change *sendableEvent,
 // false. An error is returned if there was an error with submitting the state change
 // to ECS. The error is used by the backoff handler to backoff before retrying the
 // state change submission for the first event
-func (taskEvents *taskSendableEvents) submitFirstEvent(handler *TaskHandler, backoff utils.Backoff) (bool, error) {
+func (taskEvents *taskSendableEvents) submitFirstEvent(handler *TaskHandler, backoff retry.Backoff) (bool, error) {
 	seelog.Debug("TaskHandler: Acquiring lock for sending event...")
 	taskEvents.lock.Lock()
 	defer taskEvents.lock.Unlock()
@@ -351,18 +355,18 @@ func (taskEvents *taskSendableEvents) submitFirstEvent(handler *TaskHandler, bac
 
 	if event.containerShouldBeSent() {
 		if err := event.send(sendContainerStatusToECS, setContainerChangeSent, "container",
-			handler.client, eventToSubmit, handler.stateSaver, backoff, taskEvents); err != nil {
+			handler.client, eventToSubmit, handler.dataClient, backoff, taskEvents); err != nil {
 			return false, err
 		}
 	} else if event.taskShouldBeSent() {
 		if err := event.send(sendTaskStatusToECS, setTaskChangeSent, "task",
-			handler.client, eventToSubmit, handler.stateSaver, backoff, taskEvents); err != nil {
+			handler.client, eventToSubmit, handler.dataClient, backoff, taskEvents); err != nil {
 			handleInvalidParamException(err, taskEvents.events, eventToSubmit)
 			return false, err
 		}
 	} else if event.taskAttachmentShouldBeSent() {
 		if err := event.send(sendTaskStatusToECS, setTaskAttachmentSent, "task attachment",
-			handler.client, eventToSubmit, handler.stateSaver, backoff, taskEvents); err != nil {
+			handler.client, eventToSubmit, handler.dataClient, backoff, taskEvents); err != nil {
 			handleInvalidParamException(err, taskEvents.events, eventToSubmit)
 			return false, err
 		}
@@ -384,15 +388,6 @@ func (taskEvents *taskSendableEvents) submitFirstEvent(handler *TaskHandler, bac
 func (taskEvents *taskSendableEvents) toStringUnsafe() string {
 	return fmt.Sprintf("Task event list [taskARN: %s, sending: %t, createdAt: %s]",
 		taskEvents.taskARN, taskEvents.sending, taskEvents.createdAt.String())
-}
-
-// getTasksToEventsLen returns the length of the tasksToEvents map. It is
-// used only in the test code to ascertain that map has been cleaned up
-func (handler *TaskHandler) getTasksToEventsLen() int {
-	handler.lock.RLock()
-	defer handler.lock.RUnlock()
-
-	return len(handler.tasksToEvents)
 }
 
 // handleInvalidParamException removes the event from event queue when its parameters are

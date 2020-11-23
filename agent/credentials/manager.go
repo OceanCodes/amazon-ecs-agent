@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -116,7 +116,7 @@ func NewManager() Manager {
 }
 
 // SetTaskCredentials adds or updates credentials in the credentials manager
-func (manager *credentialsManager) SetTaskCredentials(taskCredentials TaskIAMRoleCredentials) error {
+func (manager *credentialsManager) SetTaskCredentials(taskCredentials *TaskIAMRoleCredentials) error {
 	manager.taskCredentialsLock.Lock()
 	defer manager.taskCredentialsLock.Unlock()
 

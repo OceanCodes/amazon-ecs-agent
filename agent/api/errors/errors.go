@@ -1,4 +1,4 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -24,12 +24,21 @@ import (
 // instance type changed error when registering a container instance
 const InstanceTypeChangedErrorMessage = "Container instance type changes are not supported."
 
+const ClusterNotFoundErrorMessage = "Cluster not found."
+
 // IsInstanceTypeChangedError returns true if the error when
 // registering the container instance is because of instance type being
 // changed
 func IsInstanceTypeChangedError(err error) bool {
 	if awserr, ok := err.(awserr.Error); ok {
 		return strings.Contains(awserr.Message(), InstanceTypeChangedErrorMessage)
+	}
+	return false
+}
+
+func IsClusterNotFoundError(err error) bool {
+	if awserr, ok := err.(awserr.Error); ok {
+		return strings.Contains(awserr.Message(), ClusterNotFoundErrorMessage)
 	}
 	return false
 }

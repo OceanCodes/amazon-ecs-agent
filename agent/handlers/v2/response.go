@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,12 +16,13 @@ package v2
 import (
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/agent/api"
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
 	"github.com/aws/amazon-ecs-agent/agent/containermetadata"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/handlers/utils"
-	"github.com/aws/amazon-ecs-agent/agent/handlers/v1"
+	v1 "github.com/aws/amazon-ecs-agent/agent/handlers/v1"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/cihub/seelog"
 	"github.com/pkg/errors"
@@ -29,18 +30,21 @@ import (
 
 // TaskResponse defines the schema for the task response JSON object
 type TaskResponse struct {
-	Cluster            string              `json:"Cluster"`
-	TaskARN            string              `json:"TaskARN"`
-	Family             string              `json:"Family"`
-	Revision           string              `json:"Revision"`
-	DesiredStatus      string              `json:"DesiredStatus,omitempty"`
-	KnownStatus        string              `json:"KnownStatus"`
-	Containers         []ContainerResponse `json:"Containers,omitempty"`
-	Limits             *LimitsResponse     `json:"Limits,omitempty"`
-	PullStartedAt      *time.Time          `json:"PullStartedAt,omitempty"`
-	PullStoppedAt      *time.Time          `json:"PullStoppedAt,omitempty"`
-	ExecutionStoppedAt *time.Time          `json:"ExecutionStoppedAt,omitempty"`
-	AvailabilityZone   string              `json:"AvailabilityZone,omitempty"`
+	Cluster               string              `json:"Cluster"`
+	TaskARN               string              `json:"TaskARN"`
+	Family                string              `json:"Family"`
+	Revision              string              `json:"Revision"`
+	DesiredStatus         string              `json:"DesiredStatus,omitempty"`
+	KnownStatus           string              `json:"KnownStatus"`
+	Containers            []ContainerResponse `json:"Containers,omitempty"`
+	Limits                *LimitsResponse     `json:"Limits,omitempty"`
+	PullStartedAt         *time.Time          `json:"PullStartedAt,omitempty"`
+	PullStoppedAt         *time.Time          `json:"PullStoppedAt,omitempty"`
+	ExecutionStoppedAt    *time.Time          `json:"ExecutionStoppedAt,omitempty"`
+	AvailabilityZone      string              `json:"AvailabilityZone,omitempty"`
+	TaskTags              map[string]string   `json:"TaskTags,omitempty"`
+	ContainerInstanceTags map[string]string   `json:"ContainerInstanceTags,omitempty"`
+	LaunchType            string              `json:"LaunchType,omitempty"`
 }
 
 // ContainerResponse defines the schema for the container response
@@ -64,6 +68,9 @@ type ContainerResponse struct {
 	Networks      []containermetadata.Network `json:"Networks,omitempty"`
 	Health        *apicontainer.HealthStatus  `json:"Health,omitempty"`
 	Volumes       []v1.VolumeResponse         `json:"Volumes,omitempty"`
+	LogDriver     string                      `json:"LogDriver,omitempty"`
+	LogOptions    map[string]string           `json:"LogOptions,omitempty"`
+	ContainerARN  string                      `json:"ContainerARN,omitempty"`
 }
 
 // LimitsResponse defines the schema for task/cpu limits response
@@ -74,10 +81,16 @@ type LimitsResponse struct {
 }
 
 // NewTaskResponse creates a new response object for the task
-func NewTaskResponse(taskARN string,
+func NewTaskResponse(
+	taskARN string,
 	state dockerstate.TaskEngineState,
+	ecsClient api.ECSClient,
 	cluster string,
-	az string) (*TaskResponse, error) {
+	az string,
+	containerInstanceArn string,
+	propagateTags bool,
+	includeV4Metadata bool,
+) (*TaskResponse, error) {
 	task, ok := state.TaskByArn(taskARN)
 	if !ok {
 		return nil, errors.Errorf("v2 task response: unable to find task '%s'", taskARN)
@@ -91,6 +104,9 @@ func NewTaskResponse(taskARN string,
 		DesiredStatus:    task.GetDesiredStatus().String(),
 		KnownStatus:      task.GetKnownStatus().String(),
 		AvailabilityZone: az,
+	}
+	if includeV4Metadata {
+		resp.LaunchType = task.LaunchType
 	}
 
 	taskCPU := task.CPU
@@ -122,18 +138,46 @@ func NewTaskResponse(taskARN string,
 		return resp, nil
 	}
 
-	eni := task.GetTaskENI()
 	for _, dockerContainer := range containerNameToDockerContainer {
-		containerResponse := newContainerResponse(dockerContainer, eni, state)
+		containerResponse := newContainerResponse(dockerContainer, task.GetPrimaryENI(), state, includeV4Metadata)
 		resp.Containers = append(resp.Containers, containerResponse)
+	}
+
+	if propagateTags {
+		propagateTagsToMetadata(state, ecsClient, containerInstanceArn, taskARN, resp)
 	}
 
 	return resp, nil
 }
 
+func propagateTagsToMetadata(state dockerstate.TaskEngineState, ecsClient api.ECSClient, containerInstanceArn, taskARN string, resp *TaskResponse) {
+	containerInstanceTags, err := ecsClient.GetResourceTags(containerInstanceArn)
+	if err == nil {
+		resp.ContainerInstanceTags = make(map[string]string)
+		for _, tag := range containerInstanceTags {
+			resp.ContainerInstanceTags[*tag.Key] = *tag.Value
+		}
+	} else {
+		seelog.Errorf("Could not get container instance tags for %s: %s", containerInstanceArn, err.Error())
+	}
+
+	taskTags, err := ecsClient.GetResourceTags(taskARN)
+	if err == nil {
+		resp.TaskTags = make(map[string]string)
+		for _, tag := range taskTags {
+			resp.TaskTags[*tag.Key] = *tag.Value
+		}
+	} else {
+		seelog.Errorf("Could not get task tags for %s: %s", taskARN, err.Error())
+	}
+}
+
 // NewContainerResponse creates a new container response based on container id
-func NewContainerResponse(containerID string,
-	state dockerstate.TaskEngineState) (*ContainerResponse, error) {
+func NewContainerResponse(
+	containerID string,
+	state dockerstate.TaskEngineState,
+	includeV4Metadata bool,
+) (*ContainerResponse, error) {
 	dockerContainer, ok := state.ContainerByID(containerID)
 	if !ok {
 		return nil, errors.Errorf(
@@ -145,13 +189,16 @@ func NewContainerResponse(containerID string,
 			"v2 container response: unable to find task for container '%s'", containerID)
 	}
 
-	resp := newContainerResponse(dockerContainer, task.GetTaskENI(), state)
+	resp := newContainerResponse(dockerContainer, task.GetPrimaryENI(), state, includeV4Metadata)
 	return &resp, nil
 }
 
-func newContainerResponse(dockerContainer *apicontainer.DockerContainer,
+func newContainerResponse(
+	dockerContainer *apicontainer.DockerContainer,
 	eni *apieni.ENI,
-	state dockerstate.TaskEngineState) ContainerResponse {
+	state dockerstate.TaskEngineState,
+	includeV4Metadata bool,
+) ContainerResponse {
 	container := dockerContainer.Container
 	resp := ContainerResponse{
 		ID:            dockerContainer.DockerID,
@@ -168,6 +215,13 @@ func newContainerResponse(dockerContainer *apicontainer.DockerContainer,
 		Type:     container.Type.String(),
 		ExitCode: container.GetKnownExitCode(),
 		Labels:   container.GetLabels(),
+	}
+	// V4 metadata endpoint calls this function for consistency across versions,
+	// but needs additional metadata only available at this scope.
+	if includeV4Metadata {
+		resp.LogDriver = container.GetLogDriver()
+		resp.LogOptions = container.GetLogOptions()
+		resp.ContainerARN = container.ContainerArn
 	}
 
 	// Write the container health status inside the container
@@ -189,7 +243,7 @@ func newContainerResponse(dockerContainer *apicontainer.DockerContainer,
 		resp.FinishedAt = &finishedAt
 	}
 
-	for _, binding := range container.Ports {
+	for _, binding := range container.GetKnownPortBindings() {
 		port := v1.PortResponse{
 			ContainerPort: binding.ContainerPort,
 			Protocol:      binding.Protocol.String(),
@@ -202,6 +256,7 @@ func newContainerResponse(dockerContainer *apicontainer.DockerContainer,
 
 		resp.Ports = append(resp.Ports, port)
 	}
+
 	if eni != nil {
 		resp.Networks = []containermetadata.Network{
 			{
